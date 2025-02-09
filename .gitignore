@@ -1,0 +1,33 @@
+# Ignore Python virtual environment
+Privat_FMRI_synthesis/FMRI_synthesis/
+
+# Ignore common Python files
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore environment files
+.env
+*.venv
+venv/
+ENV/
+
+# Ignore model checkpoints and large files
+checkpoints/
+*.pth
+*.h5
+*.ckpt
+
+# Ignore logs and temporary files
+logs/
+*.log
+*.out
+*.err
+
+# Ignore VS Code settings (if applicable)
+.vscode/
+Privat_FMRI_synthesis/data/

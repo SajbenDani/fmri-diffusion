@@ -1,0 +1,8 @@
+nibabel
+pandas
+torch
+torchvision
+scipy
+scikit-learn
+matplotlib
+python version: 3.11.valami
