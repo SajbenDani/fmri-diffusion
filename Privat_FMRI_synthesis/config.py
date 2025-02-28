@@ -4,11 +4,11 @@ import torch
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # Change manually if needed
 
 # Training settings
-BATCH_SIZE = 4
+BATCH_SIZE = 8
 EPOCHS_AUTOENCODER = 50
 EPOCHS_DIFFUSION = 100
-LEARNING_RATE = 1e-4
-CHECKPOINT_DIR = "checkpoints/"
+LEARNING_RATE = 5e-4
+CHECKPOINT_DIR = "checkpoints_New/"
 
 # Paths
 AUTOENCODER_CHECKPOINT = CHECKPOINT_DIR + "autoencoder.pth"
