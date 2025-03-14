@@ -59,7 +59,7 @@ class UNet3DDiffusion(nn.Module):
         
         # Project to match bottleneck channels
         cond_signal = self.cond_proj(combined_emb)   # [B, base_channels*8]
-        cond_signal = cond_signal.view(B, -1, 1, 1, 1)  # [B, base_channels*8, 1, 1, 1]
+        cond_signal = cond_signal.view(B, -1, 1, 1, 1)  # [B, base_channels*8, 1, 1, 1] to match 3d tensors
         
         # Encoder
         e1 = F.silu(self.enc_conv1(x))               # [B, base_channels, D, H, W]
@@ -116,58 +116,58 @@ class LatentDiffusion:
         noisy_x = alpha * x + (1 - alpha) * noise
         return noisy_x, t, noise
     
-    def train_step(self, x, labels):
-        """
-        Performs one training step:
-          - x: latent codes [B, 1, D, H, W]
-          - labels: one-hot encoded [B, num_classes]
-        """
-        noisy_x, t, true_noise = self.forward_diffusion(x)
-        pred_noise = self.model(noisy_x, t, labels)
-        loss = nn.MSELoss()(pred_noise, true_noise)
-        self.optim.zero_grad()
-        loss.backward()
-        self.optim.step()
-        return loss.item()
+    # def train_step(self, x, labels):
+    #     """
+    #     Performs one training step:
+    #       - x: latent codes [B, 1, D, H, W]
+    #       - labels: one-hot encoded [B, num_classes]
+    #     """
+    #     noisy_x, t, true_noise = self.forward_diffusion(x)
+    #     pred_noise = self.model(noisy_x, t, labels)
+    #     loss = nn.MSELoss()(pred_noise, true_noise)
+    #     self.optim.zero_grad()
+    #     loss.backward()
+    #     self.optim.step()
+    #     return loss.item()
     
-    def sample(self, labels, steps=50):
-        """
-        Generate samples from noise conditioned on labels
-        labels: [B, num_classes] one-hot encoded
-        steps: number of diffusion steps for sampling (fewer = faster but lower quality)
-        Returns: generated latent codes [B, 1, D, H, W]
-        """
-        self.model.eval()
-        B = labels.size(0)
+    # def sample(self, labels, steps=50):
+    #     """
+    #     Generate samples from noise conditioned on labels
+    #     labels: [B, num_classes] one-hot encoded
+    #     steps: number of diffusion steps for sampling (fewer = faster but lower quality)
+    #     Returns: generated latent codes [B, 1, D, H, W]
+    #     """
+    #     self.model.eval()
+    #     B = labels.size(0)
         
-        # Start from random noise
-        x = torch.randn(B, 1, *self.latent_shape, device=self.device)
+    #     # Start from random noise
+    #     x = torch.randn(B, 1, *self.latent_shape, device=self.device)
         
-        # Gradually denoise in reverse timesteps
-        time_steps = torch.linspace(self.timesteps-1, 0, steps, device=self.device)
+    #     # Gradually denoise in reverse timesteps
+    #     time_steps = torch.linspace(self.timesteps-1, 0, steps, device=self.device)
         
-        with torch.no_grad():
-            for i, t in enumerate(time_steps):
-                # Broadcast t for the batch
-                t_batch = torch.ones(B, device=self.device) * t
+    #     with torch.no_grad():
+    #         for i, t in enumerate(time_steps):
+    #             # Broadcast t for the batch
+    #             t_batch = torch.ones(B, device=self.device) * t
                 
-                # Predict noise
-                pred_noise = self.model(x, t_batch, labels)
+    #             # Predict noise
+    #             pred_noise = self.model(x, t_batch, labels)
                 
-                # Current alpha
-                alpha = self.noise_schedule(t_batch).view(-1, 1, 1, 1, 1)
+    #             # Current alpha
+    #             alpha = self.noise_schedule(t_batch).view(-1, 1, 1, 1, 1)
                 
-                # Different alpha for the next step (or 1.0 for the final step)
-                alpha_next = self.noise_schedule(torch.max(t_batch - 1, torch.zeros_like(t_batch))).view(-1, 1, 1, 1, 1)
+    #             # Different alpha for the next step (or 1.0 for the final step)
+    #             alpha_next = self.noise_schedule(torch.max(t_batch - 1, torch.zeros_like(t_batch))).view(-1, 1, 1, 1, 1)
                 
-                # Denoise step
-                x = (x - (1 - alpha) * pred_noise) / torch.sqrt(alpha)
+    #             # Denoise step
+    #             x = (x - (1 - alpha) * pred_noise) / torch.sqrt(alpha)
                 
-                # Add noise for all steps except the last one
-                if i < steps - 1:
-                    noise = torch.randn_like(x, device=self.device)
-                    sigma = torch.sqrt((1 - alpha_next) / (1 - alpha) * (1 - alpha/alpha_next))
-                    x = torch.sqrt(alpha_next) * x + sigma * noise
+    #             # Add noise for all steps except the last one
+    #             if i < steps - 1:
+    #                 noise = torch.randn_like(x, device=self.device)
+    #                 sigma = torch.sqrt((1 - alpha_next) / (1 - alpha) * (1 - alpha/alpha_next))
+    #                 x = torch.sqrt(alpha_next) * x + sigma * noise
         
-        self.model.train()
-        return x
+    #     self.model.train()
+    #     return x

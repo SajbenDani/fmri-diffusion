@@ -30,14 +30,14 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 NUM_CLASSES = 5
 LATENT_SHAPE = (8, 8, 8)  # As defined in your autoencoder
 BATCH_SIZE = 16
-EPOCHS = 50
-PATIENCE = 5
+EPOCHS = 100
+PATIENCE = 10
 
 # Directories and CSV paths (update these paths as needed)
 CHECKPOINT_DIR = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New'
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 DIFFUSION_CKPT_PATH = os.path.join(CHECKPOINT_DIR, 'latent_diffusion.pth')
-AUTOENCODER_CHECKPOINT = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New/improved_autoencoder_best.pth'
+AUTOENCODER_CHECKPOINT = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New/finetuned_autoencoder_best.pth'
 TRAIN_CSV = r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/train.csv'
 VAL_CSV = r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/val.csv'
 TEST_CSV = r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/test.csv'
