@@ -49,9 +49,9 @@ class ImprovedFMRIPredictor:
         self.brain_mask = None
 
         # Define directories (update these paths according to your local setup)
-        self.models_dir = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/models"
-        self.checkpoints_dir = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New"
-        self.logs_dir = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/logs"
+        self.models_dir = "\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\models"
+        self.checkpoints_dir = "\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\checkpoints"
+        self.logs_dir = "\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\logs"
 
         # Define label categories for better visualization
         self.LABELS = {
