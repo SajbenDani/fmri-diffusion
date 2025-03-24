@@ -1,0 +1,17 @@
+fmri_min: mean=0.000000, std=0.000000, min=0.000000, max=0.000000
+fmri_max: mean=0.917958, std=0.072136, min=0.555619, max=0.989377
+fmri_mean: mean=0.094619, std=0.010681, min=0.055004, max=0.121173
+recon_min: mean=0.000000, std=0.000000, min=0.000000, max=0.000000
+recon_max: mean=0.883142, std=0.054445, min=0.577986, max=0.990692
+recon_mean: mean=0.093775, std=0.010552, min=0.054828, max=0.119728
+z_mean: mean=-0.006864, std=0.004876, min=-0.020368, max=0.007769
+z_std: mean=0.958922, std=0.010011, min=0.941293, max=1.019767
+label_emb_mean: mean=-5.736378, std=0.077513, min=-5.819276, max=-5.610611
+label_emb_std: mean=1.467650, std=0.020709, min=1.438161, max=1.491834
+modulated_z_mean: mean=-0.003815, std=0.003273, min=-0.014722, max=0.003452
+modulated_z_std: mean=0.100390, std=0.043718, min=0.025008, max=0.323699
+pixel_diff_var: mean=0.000168, std=0.000035, min=0.000066, max=0.000263
+mse_loss: mean=0.000169, std=0.000035, min=0.000066, max=0.000264
+l1_loss: mean=0.004364, std=0.000487, min=0.002727, max=0.005775
+ssim_loss: mean=0.012248, std=0.001173, min=0.009295, max=0.015438
+flattened_recon_mse: mean=5.076036, std=1.601917, min=2.978278, max=14.386160
