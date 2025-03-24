@@ -151,7 +151,8 @@ class FMRI_Dataset(Dataset):
 
 
 class FMRIDataModule(LightningDataModule):
-    def __init__(self, train_csv, val_csv, test_csv, data_dir, batch_size=8, num_workers=8, 
+    #num workers set to zero because of cpu setup.
+    def __init__(self, train_csv, val_csv, test_csv, data_dir, batch_size=8, num_workers=0, 
                  cache_size=50, memory_limit_gb=60, prefetch_factor=2):
         super().__init__()
         self.train_csv = train_csv

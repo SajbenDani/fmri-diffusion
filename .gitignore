@@ -1,5 +1,10 @@
 # Ignore the specified folder and its contents
+Privat_FMRI_synthesis/checkpoints/
 Privat_FMRI_synthesis/checkpoints_New/
+Privat_FMRI_synthesis/logs/
+Privat_FMRI_synthesis/visualizations/
+myenv/
+Privat_FMRI_synthesis/data/
 
 # Ignore Python virtual environment
 Privat_FMRI_synthesis/FMRI_synthesis/
