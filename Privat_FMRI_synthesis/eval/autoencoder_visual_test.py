@@ -11,54 +11,46 @@ import sys
 # Add parent directory to the system path
 PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(PARENT_DIR)
-from models.autoencoder import fMRIAutoencoder  # Import from file
+
+# Import necessary components
+from models.autoencoder import fMRIAutoencoder
 from utils.dataset import FMRIDataModule
 from config import *
 
-# Configuration
-DEVICE = torch.device('cpu')  # Explicitly set to CPU
-NUM_CLASSES = 5
-LATENT_DIM = 256
-BATCH_SIZE = 1
-BASE_LOG_DIR = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\logs'
-CHECKPOINT_DIR = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\checkpoints'
-TEST_CSV = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\data\new_format_config\test.csv'  # Adjust if needed
-DATA_DIR = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\data\mri'  # Adjust if needed
-AUTOENCODER_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "autoencoder.pth")
-
-# Permutation for visualization (2, 0, 1)
-PERMUTE_ORDER = (2, 0, 1)
-
-# Define custom colormap: black to light green
-colors = [(0, 0, 0), (0, 1, 0.5)]
+# Define custom colormap
+colors = [(0, 0, 0), (0, 1, 0.5)]  # Black to light green
 n_bins = 256
-cmap_name = 'custom_green'
-cm = LinearSegmentedColormap.from_list(cmap_name, colors, N=n_bins)
+cm = LinearSegmentedColormap.from_list('custom_green', colors, N=n_bins)
 colormaps.register(cm)
+
+# Permutation for visualization (swap dimensions)
+PERMUTE_ORDER = (2, 0, 1)  # [D, H, W] → [W, D, H]
 
 # Plotting Functions
 def plot_slices(data, ax_row):
-    depth = data.shape[0]  # W after permutation (91)
+    """Plots 8 evenly spaced slices from the fMRI scan."""
+    depth = data.shape[0]
     step = depth // 8
-    indices = [i * step for i in range(8)]  # e.g., [0, 11, 22, 33, 45, 56, 67, 78]
+    indices = [i * step for i in range(8)]
     for i, idx in enumerate(indices):
-        slice_data = data[idx]
-        slice_data = (slice_data - slice_data.min()) / (slice_data.max() - slice_data.min() + 1e-8)
+        slice_data = (data[idx] - data[idx].min()) / (data[idx].max() - data[idx].min() + 1e-8)
         ax_row[i].imshow(slice_data, cmap='custom_green', vmin=0, vmax=1)
         ax_row[i].set_title(f"Depth {idx}")
         ax_row[i].axis('off')
 
 def plot_mip(data, ax):
-    mip = np.max(data, axis=0)  # Max along W (91) -> [91, 109]
+    """Plots Maximum Intensity Projection (MIP)."""
+    mip = np.max(data, axis=0)
     mip = (mip - mip.min()) / (mip.max() - mip.min() + 1e-8)
     ax.imshow(mip, cmap='custom_green', vmin=0, vmax=1)
     ax.set_title("MIP")
     ax.axis('off')
 
 def main():
+    """Evaluates the autoencoder on test data and saves visualizations."""
     # Create timestamped directory
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    LOG_DIR = os.path.join(BASE_LOG_DIR, f"autoencoder_test_{timestamp}")
+    LOG_DIR = os.path.join(LOGS_DIR, f"autoencoder_test_{timestamp}")
     os.makedirs(LOG_DIR, exist_ok=True)
     ORIGINAL_DIR = os.path.join(LOG_DIR, "original_plots")
     RECONSTRUCTED_DIR = os.path.join(LOG_DIR, "reconstructed_autoencoder_plots")
@@ -66,43 +58,38 @@ def main():
     os.makedirs(RECONSTRUCTED_DIR, exist_ok=True)
     print(f"Logging visualizations to {LOG_DIR}")
 
-    # Load the Trained Autoencoder
-    autoencoder = fMRIAutoencoder(latent_dim=LATENT_DIM, num_classes=NUM_CLASSES).to(DEVICE)
+    # Load the trained autoencoder
+    autoencoder = fMRIAutoencoder().to(DEVICE)
     autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT, map_location=DEVICE))
     autoencoder.eval()
     print(f"Loaded autoencoder from {AUTOENCODER_CHECKPOINT}")
 
     # DataModule for Test Data
     data_module = FMRIDataModule(
-        train_csv=TEST_CSV,
-        val_csv=TEST_CSV,
-        test_csv=TEST_CSV,
+        train_csv=TEST_DATA,
+        val_csv=TEST_DATA,
+        test_csv=TEST_DATA,
         data_dir=DATA_DIR,
-        batch_size=BATCH_SIZE,
-        num_workers=0  # Single-threaded to avoid multiprocessing issues
+        batch_size=1,  # Always use batch size 1 for visualization
+        num_workers=0  
     )
     data_module.setup()
     test_loader = data_module.test_dataloader()
 
     # Get one sample
-    fmri_tensor, labels = next(iter(test_loader))  # Take the first batch (batch_size=1)
-    fmri_tensor = fmri_tensor.to(DEVICE)  # [1, 1, 91, 109, 91]
-    labels = labels.to(DEVICE)  # [1]
-    label_value = labels.item()  # For labeling the plot
+    fmri_tensor, labels = next(iter(test_loader))
+    fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
+    label_value = labels.item()
 
     # Autoencoder Reconstruction
     with torch.no_grad():
-        recon_autoencoder = autoencoder(fmri_tensor, labels)  # [1, 1, 91, 109, 91]
+        recon_autoencoder = autoencoder(fmri_tensor, labels)
 
-    # Convert to NumPy for plotting (apply permutation for visualization)
-    original = fmri_tensor.squeeze(0).squeeze(0).cpu().numpy()  # [91, 109, 91] = [D, H, W]
-    recon_autoencoder = recon_autoencoder.squeeze(0).squeeze(0).cpu().numpy()  # [91, 109, 91] = [D, H, W]
+    # Convert to NumPy for plotting
+    original = np.transpose(fmri_tensor.squeeze().cpu().numpy(), PERMUTE_ORDER)
+    recon_autoencoder = np.transpose(recon_autoencoder.squeeze().cpu().numpy(), PERMUTE_ORDER)
 
-    # Apply permutation (2, 0, 1) -> [W, D, H]
-    original = np.transpose(original, PERMUTE_ORDER)  # [91, 91, 109]
-    recon_autoencoder = np.transpose(recon_autoencoder, PERMUTE_ORDER)  # [91, 91, 109]
-
-    # Plot Original
+    # Plot Original fMRI
     fig, axes = plt.subplots(1, 9, figsize=(20, 2.5), gridspec_kw={'width_ratios': [1]*8 + [1.5]})
     plot_slices(original, axes[:-1])
     plot_mip(original, axes[-1])
@@ -112,7 +99,7 @@ def main():
     plt.savefig(original_file)
     plt.close()
 
-    # Plot Autoencoder Reconstruction
+    # Plot Reconstructed fMRI
     fig, axes = plt.subplots(1, 9, figsize=(20, 2.5), gridspec_kw={'width_ratios': [1]*8 + [1.5]})
     plot_slices(recon_autoencoder, axes[:-1])
     plot_mip(recon_autoencoder, axes[-1])
@@ -122,9 +109,9 @@ def main():
     plt.savefig(recon_autoencoder_file)
     plt.close()
 
-    print("Visual evaluation completed.")
     print(f"Original plot saved to {original_file}")
     print(f"Autoencoder reconstructed plot saved to {recon_autoencoder_file}")
+    print("Evaluation complete.")
 
 if __name__ == '__main__':
     main()

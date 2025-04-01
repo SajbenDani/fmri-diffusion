@@ -1,129 +1,147 @@
 import torch
 import torch.optim as optim
 import os
+import sys
 import numpy as np
 import random
-import sys
-# Get the parent directory of the current script (training/)
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from tqdm import tqdm
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+
+# Get the parent directory of the training folder
 PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-# Add parent directory to sys.path
 sys.path.append(PARENT_DIR)
-from models.autoencoder import fMRIAutoencoder
-from utils.dataset import FMRIDataModule  # Import the new FMRIDataModule
-from config import *
-from torchmetrics import StructuralSimilarityIndexMeasure
 
-# Set the random seed
+# Import configuration settings
+from config import *
+from models.autoencoder import fMRIAutoencoder
+from utils.dataset import FMRIDataModule
+
+# Set random seed for reproducibility
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-
-# Ensure reproducibility for CUDA
 torch.cuda.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)  # For multi-GPU setups
+torch.cuda.manual_seed_all(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Ensure checkpoint directory exists
+# Ensure directories exist
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOGS_DIR, "training_log.txt")
 
 # Initialize model
 autoencoder = fMRIAutoencoder().to(DEVICE)
-
-# Load last saved checkpoint if available (for crash recovery)
-LAST_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "autoencoder_last.pth")
-if os.path.exists(LAST_MODEL_PATH):
-    autoencoder.load_state_dict(torch.load(LAST_MODEL_PATH))
+if os.path.exists(AUTOENCODER_CHECKPOINT):
+    autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT))
     print("✅ Loaded last saved model for crash recovery")
 
 # Define loss and optimizer
 criterion = torch.nn.MSELoss()
-optimizer = optim.Adam(autoencoder.parameters(), lr=LEARNING_RATE)
+optimizer = optim.Adam(autoencoder.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
 ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
 
-# Initialize FMRIDataModule
+# Learning Rate Scheduler (Cosine Annealing)
+#scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS_AUTOENCODER, eta_min=5e-6)
+
+# Initialize Data Module
 data_module = FMRIDataModule(
-    train_csv=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/train.csv',
-    val_csv=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/val.csv',
-    test_csv=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/test.csv',
-    data_dir=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri',
+    train_csv=TRAIN_DATA,
+    val_csv=VAL_DATA,
+    test_csv=TEST_DATA,
+    data_dir=DATA_DIR,
     batch_size=BATCH_SIZE,
-    num_workers=16  # Specify number of workers here
+    num_workers=16
 )
-
-# ⚠️ Call setup() before using dataloaders
 data_module.setup()
-
-# Define dataloaders only once
 train_loader = data_module.train_dataloader()
 val_loader = data_module.val_dataloader()
 
-# Initialize tracking variables before the loop
-best_loss = float('inf')  # Initialize best_loss to infinity
-counter = 0               # Initialize patience counter
-patience = 10             # Define patience value if not defined in config
+# Training setup
+best_loss = float('inf')
+counter = 0
+patience = 10
 
-# Training loop with validation
-for epoch in range(EPOCHS_AUTOENCODER):
-    # Training Phase
-    autoencoder.train()
-    train_loss = 0
-    print(f"Epoch {epoch + 1}/{EPOCHS_AUTOENCODER}")
+with open(LOG_FILE, "w") as log_file:
+    log_file.write("Epoch,Train Loss,Validation Loss,Train MSE,Train L1,Train SSIM,Val MSE,Val L1,Val SSIM\n")
 
-    for i, (fmri_tensor, labels) in enumerate(train_loader):  # ✅ Use stored train_loader
-        fmri_tensor = fmri_tensor.to(DEVICE)
-        labels = labels.to(DEVICE)
-        recon = autoencoder(fmri_tensor, labels)
-        mse_loss = criterion(recon, fmri_tensor)
-        ssim_loss = 1 - ssim(recon, fmri_tensor)  # SSIM (higher is better, so we subtract from 1)
-        loss = mse_loss + 0.1 * ssim_loss
+    for epoch in range(EPOCHS_AUTOENCODER):
+        autoencoder.train()
+        train_loss, train_mse, train_l1, train_ssim = 0, 0, 0, 0
+        print(f"Epoch {epoch + 1}/{EPOCHS_AUTOENCODER}")
+        progress_bar = tqdm(train_loader, desc=f"Training {epoch+1}/{EPOCHS_AUTOENCODER}")
         
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        train_loss += loss.item()
-        print(f"Batch {i + 1}/{len(train_loader)} - Loss: {loss.item():.4f}")
-
-    train_loss /= len(train_loader)
-    print(f"Epoch {epoch + 1} completed - Avg Train Loss: {train_loss:.4f}")
-
-    # Validation Phase
-    autoencoder.eval()
-    val_loss = 0
-
-    with torch.no_grad():
-        for i, (fmri_tensor, labels) in enumerate(val_loader):  # ✅ Use stored val_loader
-            fmri_tensor = fmri_tensor.to(DEVICE)
-            labels = labels.to(DEVICE)
+        for fmri_tensor, labels in progress_bar:
+            fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
             recon = autoencoder(fmri_tensor, labels)
-
+            
             mse_loss = criterion(recon, fmri_tensor)
+            l1_loss = torch.nn.functional.l1_loss(recon, fmri_tensor)
             ssim_loss = 1 - ssim(recon, fmri_tensor)
-            loss = mse_loss + 0.1 * ssim_loss
+            loss = 0.5 * mse_loss + 0.2 * l1_loss + 0.3 * ssim_loss
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            train_mse += mse_loss.item()
+            train_l1 += l1_loss.item()
+            train_ssim += ssim_loss.item()
+            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-            val_loss += loss.item()
+        train_loss /= len(train_loader)
+        train_mse /= len(train_loader)
+        train_l1 /= len(train_loader)
+        train_ssim /= len(train_loader)
+        print(f"Epoch {epoch + 1} completed - Avg Train Loss: {train_loss:.4f}, MSE: {train_mse:.4f}, L1: {train_l1:.4f}, SSIM: {train_ssim:.4f}")
+        # Update Learning Rate Scheduler
+        #scheduler.step()
+        #print(f"🔄 LR Updated: {scheduler.get_last_lr()[0]:.6f}")
+      
+        # Validation Phase
+        autoencoder.eval()
+        val_loss, val_mse, val_l1, val_ssim = 0, 0, 0, 0
+        val_bar = tqdm(val_loader, desc=f"Validating {epoch+1}/{EPOCHS_AUTOENCODER}")
+        with torch.no_grad():
+            for fmri_tensor, labels in val_bar:
+                fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
+                recon = autoencoder(fmri_tensor, labels)
+                
+                mse_loss = criterion(recon, fmri_tensor)
+                l1_loss = torch.nn.functional.l1_loss(recon, fmri_tensor)
+                ssim_loss = 1 - ssim(recon, fmri_tensor)
+                loss = 0.5 * mse_loss + 0.2 * l1_loss + 0.3 * ssim_loss
+                
+                val_loss += loss.item()
+                val_mse += mse_loss.item()
+                val_l1 += l1_loss.item()
+                val_ssim += ssim_loss.item()
+                val_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-    val_loss /= len(val_loader)
-    print(f"Epoch {epoch + 1} - Avg Validation Loss: {val_loss:.4f}")
+        val_loss /= len(val_loader)
+        val_mse /= len(val_loader)
+        val_l1 /= len(val_loader)
+        val_ssim /= len(val_loader)
+        print(f"Epoch {epoch + 1} - Avg Validation Loss: {val_loss:.4f}, MSE: {val_mse:.4f}, L1: {val_l1:.4f}, SSIM: {val_ssim:.4f}")
 
-    # ✅ Save the model after every epoch (for crash recovery)
-    torch.save(autoencoder.state_dict(), LAST_MODEL_PATH)
-    print(f"💾 Model checkpoint saved after epoch {epoch + 1}")
+        # Log losses
+        log_file.write(f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{train_mse:.4f},{train_l1:.4f},{train_ssim:.4f},{val_mse:.4f},{val_l1:.4f},{val_ssim:.4f}\n")
+        log_file.flush()
 
-    # Save best model
-    if val_loss < best_loss:
-        best_loss = val_loss
-        counter = 0
-        torch.save(autoencoder.state_dict(), AUTOENCODER_CHECKPOINT)
-        print("✅ Best model updated!")
+        # Save best model
+        if val_loss < best_loss:
+            best_loss = val_loss
+            counter = 0
+            torch.save(autoencoder.state_dict(), AUTOENCODER_CHECKPOINT)
+            print("✅ Best model updated!")
+        else:
+            counter += 1
+            print(f"Patience counter: {counter}/{patience}")
+            if counter >= patience:
+                print("🚨 Early stopping triggered!")
+                break
 
-    else:
-        counter += 1
-        print(f"Patience counter: {counter}/{patience}")
-        if counter >= patience:
-            print("🚨 Early stopping triggered!")
-            break
-
-print(f"✅ Training complete. Final model saved at: {LAST_MODEL_PATH}")
+print(f"✅ Training complete. Best model saved at: {AUTOENCODER_CHECKPOINT}")
