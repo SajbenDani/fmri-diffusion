@@ -14,7 +14,7 @@ class fMRIAutoencoder(nn.Module):
             nn.Conv3d(64, 128, 3, stride=2, padding=1), nn.ReLU(), # -> (128, 12, 14, 12)
             nn.Flatten(),
             # This change ensures that the linear layer 
-            # now accepts 258048 features, which is what you get from your convolutions.
+            # now accepts 258048 features, which is what we get from the convolutions.
             nn.Linear(128*12*14*12, latent_dim) # Since the actual flattened size is 258048 using a fully connected layer to get the 256
         )
         # Decoder: Mirror the encoder

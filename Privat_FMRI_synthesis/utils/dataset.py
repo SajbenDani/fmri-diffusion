@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 class FMRI_Dataset(Dataset):
     LABEL_MAP = {
-        "lh": 0,   # Left hemisphere
-        "rh": 1,    # Right hemisphere
+        "lh": 0,   # Left hand
+        "rh": 1,    # Right hand
         "lf": 2,   # Left foot
         "rf": 3,    # Right foot
         "t": 4,    # Tongue

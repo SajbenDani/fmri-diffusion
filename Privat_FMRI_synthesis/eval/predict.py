@@ -3,29 +3,27 @@ import numpy as np
 import imageio
 import matplotlib.pyplot as plt
 import os
-from models.diffusion import diffusion_model, latent_dim, spatial_dim
+
+from models.diffusion import diffusion_model, LATENT_DIM, spatial_dim
 from models.autoencoder import fMRIAutoencoder
-from config import DEVICE
+from config import DEVICE, AUTOENCODER_CHECKPOINT, DIFFUSION_CHECKPOINT, LOG_DIR, NUM_TIMESTEPS
+
+from diffusers import DDPMScheduler
 
 # Set the directory for saving outputs
-LOG_DIR = "C:/Users/sajbe/Documents/onLab/Privat_FMRI_synthesis/logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Load the pre-trained models
-autoencoder = fMRIAutoencoder(latent_dim=latent_dim).to(DEVICE)
-autoencoder.load_state_dict(torch.load(
-    "C:/Users/sajbe/Documents/onLab/Privat_FMRI_synthesis/checkpoints/autoencoder.pth",
-    map_location=DEVICE))
+# Load the pre-trained autoencoder
+autoencoder = fMRIAutoencoder(latent_dim=LATENT_DIM).to(DEVICE)
+autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT, map_location=DEVICE))
 autoencoder.eval()
 
-diffusion_model.load_state_dict(torch.load(
-    "C:/Users/sajbe/Documents/onLab/Privat_FMRI_synthesis/checkpoints/diffusion_model.pth",
-    map_location=DEVICE))
+# Load the pre-trained diffusion model
+diffusion_model.load_state_dict(torch.load(DIFFUSION_CHECKPOINT, map_location=DEVICE))
 diffusion_model.eval()
 
 # Define the scheduler for the diffusion process
-from diffusers import DDPMScheduler
-scheduler = DDPMScheduler(num_train_timesteps=1000)
+scheduler = DDPMScheduler(num_train_timesteps=NUM_TIMESTEPS)
 
 def predict_and_generate(num_steps=50, seed=42):
     """
@@ -49,7 +47,7 @@ def predict_and_generate(num_steps=50, seed=42):
     frames = []  # Store intermediate images for the GIF
     
     # Create a sequence of timesteps (from 999 to 0, linearly spaced)
-    timesteps = torch.linspace(999, 0, steps=num_steps).long().to(DEVICE)
+    timesteps = torch.linspace(NUM_TIMESTEPS - 1, 0, steps=num_steps).long().to(DEVICE)
     
     for t in timesteps:
         with torch.no_grad():
