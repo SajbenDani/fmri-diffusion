@@ -30,7 +30,6 @@ class UNet3DDiffusion(nn.Module):
         )
         
         # The conditioning projection to match bottleneck channels
-        # Update this projection to match base_channels*8 instead of base_channels*4
         self.cond_proj = nn.Linear(time_emb_dim, base_channels*8)
         
         # Encoder path with more layers

@@ -15,19 +15,6 @@ from models.autoencoder import Improved3DAutoencoder  # Import from file
 from utils.dataset import FMRIDataModule
 from config import *
 
-# Configuration
-DEVICE = torch.device('cpu')  # Explicitly set to CPU
-NUM_CLASSES = 5
-LATENT_DIMS = (8, 8, 8)
-BATCH_SIZE = 1
-BASE_LOG_DIR = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\logs'
-CHECKPOINT_DIR = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\checkpoints'
-TEST_CSV = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\data\new_format_config\test.csv'  # Adjust if needed
-DATA_DIR = r'C:\Users\sajbe\Documents\onLab\fmri-diffusion\Privat_FMRI_synthesis\data\mri'  # Adjust if needed
-AUTOENCODER_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "finetuned_autoencoder_best.pth")
-
-# Permutation for visualization (2, 0, 1)
-PERMUTE_ORDER = (2, 0, 1)
 
 # Define custom colormap: black to light green
 colors = [(0, 0, 0), (0, 1, 0.5)]
@@ -67,10 +54,10 @@ def main():
     print(f"Logging visualizations to {LOG_DIR}")
 
     # Load the Trained Autoencoder
-    autoencoder = Improved3DAutoencoder(latent_dims=LATENT_DIMS, num_classes=NUM_CLASSES).to(DEVICE)
-    autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT, map_location=DEVICE))
+    autoencoder = Improved3DAutoencoder(latent_dims=LATENT_SHAPE, num_classes=NUM_CLASSES).to(DEVICE)
+    autoencoder.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=DEVICE))
     autoencoder.eval()
-    print(f"Loaded autoencoder from {AUTOENCODER_CHECKPOINT}")
+    print(f"Loaded autoencoder from {BEST_MODEL_PATH}")
 
     # DataModule for Test Data
     data_module = FMRIDataModule(
@@ -78,7 +65,7 @@ def main():
         val_csv=TEST_CSV,
         test_csv=TEST_CSV,
         data_dir=DATA_DIR,
-        batch_size=BATCH_SIZE,
+        batch_size=1,  # Batch size of 1 for evaluation
         num_workers=0  # Single-threaded to avoid multiprocessing issues
     )
     data_module.setup()

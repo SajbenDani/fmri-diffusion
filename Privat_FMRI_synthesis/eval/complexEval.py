@@ -18,6 +18,8 @@ from utils.dataset import FMRIDataModule
 from models.autoencoder import Improved3DAutoencoder  
 # Import the diffusion model definition
 from models.diffusion import LatentDiffusion
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+from config import *
 
 # Utility function: one-hot encoding
 def one_hot_encode(labels, num_classes=5):
@@ -26,36 +28,23 @@ def one_hot_encode(labels, num_classes=5):
     one_hot.scatter_(1, labels.view(-1, 1), 1)
     return one_hot
 
-# ----- Configuration -----
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-NUM_CLASSES = 5
-LATENT_SHAPE = (8, 8, 8)  # as defined in your autoencoder
-BATCH_SIZE = 16
-
-# Directories and CSV paths (update these paths as needed)
-CHECKPOINT_DIR = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New'
-DIFFUSION_CKPT_PATH = os.path.join(CHECKPOINT_DIR, 'latent_diffusion.pth')
-AUTOENCODER_CHECKPOINT = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New/improved_autoencoder_best.pth'
-TEST_CSV = r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/test.csv'
-DATA_DIR = r'/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri'
-
 # ----- Load Pre-trained Autoencoder -----
-if not os.path.exists(AUTOENCODER_CHECKPOINT):
-    raise FileNotFoundError(f'Autoencoder checkpoint not found: {AUTOENCODER_CHECKPOINT}')
+if not os.path.exists(BEST_MODEL_PATH):
+    raise FileNotFoundError(f'Autoencoder checkpoint not found: {BEST_MODEL_PATH}')
 autoencoder = Improved3DAutoencoder(latent_dims=LATENT_SHAPE, num_classes=NUM_CLASSES).to(DEVICE)
-autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT, map_location=DEVICE))
+autoencoder.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=DEVICE))
 autoencoder.eval()
 print("Loaded pre-trained autoencoder.")
 
 # ----- Initialize DataModule for Test Data -----
 data_module = FMRIDataModule(
-    train_csv=TEST_CSV,  # using test.csv here
-    val_csv=TEST_CSV,
+    train_csv=TRAIN_CSV, 
+    val_csv=VAL_CSV,
     test_csv=TEST_CSV,
     data_dir=DATA_DIR,
-    batch_size=BATCH_SIZE,
-    num_workers=20,
-    prefetch_factor=4
+    batch_size=1,  # Batch size of 1 for evaluation
+    num_workers=NUM_WORKERS,
+    prefetch_factor=PREFETCH_FACTOR
 )
 data_module.setup()
 test_loader = data_module.test_dataloader()
@@ -63,10 +52,10 @@ test_loader = data_module.test_dataloader()
 # ----- Initialize Diffusion Model -----
 diffusion_model = LatentDiffusion(latent_shape=LATENT_SHAPE, num_classes=NUM_CLASSES, device=DEVICE)
 # Load the diffusion checkpoint (if it exists) so we evaluate the best model
-if os.path.exists(DIFFUSION_CKPT_PATH):
-    state = torch.load(DIFFUSION_CKPT_PATH, map_location=DEVICE)
+if os.path.exists(DIFFUSION_CHECKPOINT):
+    state = torch.load(DIFFUSION_CHECKPOINT, map_location=DEVICE)
     diffusion_model.model.load_state_dict(state)
-    print(f"Loaded diffusion model checkpoint from {DIFFUSION_CKPT_PATH}")
+    print(f"Loaded diffusion model checkpoint from {DIFFUSION_CHECKPOINT}")
 else:
     print("No diffusion checkpoint found. Exiting evaluation.")
     exit()
@@ -76,7 +65,6 @@ diffusion_model.model.eval()
 # Loss metrics (in image space)
 mse_criterion = nn.MSELoss()
 l1_criterion = nn.L1Loss()
-from torchmetrics.image import StructuralSimilarityIndexMeasure
 ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
 
 total_mse = 0.0

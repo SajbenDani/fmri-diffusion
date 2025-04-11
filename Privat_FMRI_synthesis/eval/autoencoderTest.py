@@ -6,7 +6,7 @@ import numpy as np
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 import matplotlib.pyplot as plt
 
-# Szülő könyvtár hozzáadása az elérési úthoz
+# Add parent directory to the path
 PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 import sys
 sys.path.append(PARENT_DIR)
@@ -14,59 +14,53 @@ from models.autoencoder import Improved3DAutoencoder
 from utils.dataset import FMRIDataModule
 from config import *
 
-# Konstansok
-NUM_CLASSES = 5
-CHECKPOINT_PATH = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_New/finetuned_autoencoder_best.pth'
-OUTPUT_DIR = r'/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/test_analysis'
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# One-hot encoding függvény
+# One-hot encoding function
 def one_hot_encode(labels, num_classes=NUM_CLASSES):
     batch_size = labels.size(0)
     one_hot = torch.zeros(batch_size, num_classes, device=labels.device)
     one_hot.scatter_(1, labels.unsqueeze(1), 1)
     return one_hot
 
-# Modell betöltése
+# Load model
 autoencoder = Improved3DAutoencoder(latent_dims=(8, 8, 8), num_classes=NUM_CLASSES).to(DEVICE)
-if os.path.exists(CHECKPOINT_PATH):
-    autoencoder.load_state_dict(torch.load(CHECKPOINT_PATH, map_location=DEVICE))
-    print(f"✅ Loaded checkpoint from {CHECKPOINT_PATH}")
+if os.path.exists(BEST_MODEL_PATH):
+    autoencoder.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=DEVICE))
+    print(f"✅ Loaded checkpoint from {BEST_MODEL_PATH}")
 else:
-    raise FileNotFoundError(f"Checkpoint not found at {CHECKPOINT_PATH}")
+    raise FileNotFoundError(f"Checkpoint not found at {BEST_MODEL_PATH}")
 autoencoder.eval()
 
-# Loss funkciók
+# Loss functions
 mse_criterion = nn.MSELoss(reduction='mean')
 l1_criterion = nn.L1Loss(reduction='mean')
 ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
 
-# DataModule inicializálása
+# Initialize DataModule
 data_module = FMRIDataModule(
-    train_csv=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/train.csv',
-    val_csv=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/val.csv',
-    test_csv=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/new_format_config/test.csv',
-    data_dir=r'/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri',
-    batch_size=1,  # Egyenkénti feldolgozás a pontos logolás érdekében
-    num_workers=4
+    train_csv=TRAIN_CSV,
+    val_csv=VAL_CSV,
+    test_csv=TEST_CSV,
+    data_dir=DATA_DIR,
+    batch_size=1,
+    num_workers=NUM_WORKERS
 )
 data_module.setup()
 test_loader = data_module.test_dataloader()
 
-# Tracking változók
+# Tracking variables
 metrics = {
     'fmri_min': [], 'fmri_max': [], 'fmri_mean': [],
     'recon_min': [], 'recon_max': [], 'recon_mean': [],
     'z_mean': [], 'z_std': [],
     'label_emb_mean': [], 'label_emb_std': [],
     'modulated_z_mean': [], 'modulated_z_std': [],
-    'pixel_diff_var': [],
+    'pixel_diff_var': [], 
     'mse_loss': [], 'l1_loss': [], 'ssim_loss': []
 }
 
 print(f"Evaluating model on test set with {len(test_loader)} samples...")
 
-# Teszt ciklus
+# Test loop
 with torch.no_grad():
     for batch_idx, (fmri_tensor, labels) in enumerate(tqdm(test_loader, desc="Evaluating Test Set")):
         fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
@@ -78,12 +72,12 @@ with torch.no_grad():
         label_emb = autoencoder.label_embedding(labels_one_hot)
         modulated_z = z * torch.sigmoid(label_emb)
 
-        # Metrikák számítása
+        # Calculate metrics
         mse_loss = mse_criterion(recon, fmri_tensor).item()
         l1_loss = l1_criterion(recon, fmri_tensor).item()
         ssim_loss = 1 - ssim(recon, fmri_tensor).item()
 
-        # Tárolás
+        # Store metrics
         metrics['fmri_min'].append(fmri_tensor.min().item())
         metrics['fmri_max'].append(fmri_tensor.max().item())
         metrics['fmri_mean'].append(fmri_tensor.mean().item())
@@ -101,12 +95,12 @@ with torch.no_grad():
         metrics['l1_loss'].append(l1_loss)
         metrics['ssim_loss'].append(ssim_loss)
 
-        # Opcionális: mentsük el az első néhány rekonstrukciót vizualizációra
+        # Optional: save the first few reconstructions for visualization
         if batch_idx < 3:
             torch.save(recon.cpu(), os.path.join(OUTPUT_DIR, f'recon_sample_{batch_idx}.pt'))
             torch.save(fmri_tensor.cpu(), os.path.join(OUTPUT_DIR, f'fmri_sample_{batch_idx}.pt'))
 
-# Összesített eredmények számítása
+# Calculate aggregated results
 def print_stats(name, values):
     mean = np.mean(values)
     std = np.std(values)
@@ -132,7 +126,7 @@ print_stats("MSE loss", metrics['mse_loss'])
 print_stats("L1 loss", metrics['l1_loss'])
 print_stats("SSIM loss", metrics['ssim_loss'])
 
-# Latens tér histogram készítése (z és modulated_z)
+# Create histogram of latent space (z and modulated_z)
 plt.figure(figsize=(12, 6))
 plt.hist(np.array(metrics['z_mean']), bins=20, alpha=0.5, label='z mean')
 plt.hist(np.array(metrics['modulated_z_mean']), bins=20, alpha=0.5, label='modulated_z mean')
