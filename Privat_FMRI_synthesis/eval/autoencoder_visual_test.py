@@ -1,117 +1,165 @@
+#!/usr/bin/env python3
 import os
+import sys
 import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib import colormaps
 import torch
-from torch.utils.data import DataLoader
-import sys
+import nibabel as nib
+from monai.inferers import sliding_window_inference
 
-# Add parent directory to the system path
-PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# Add parent directory to path
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PARENT_DIR)
 
-# Import necessary components
-from models.autoencoder import fMRIAutoencoder
-from utils.dataset import FMRIDataModule
-from config import *
+# Import the model
+from models.autoencoder import Improved3DAutoencoder
 
-# Define custom colormap
-colors = [(0, 0, 0), (0, 1, 0.5)]  # Black to light green
+# Define custom colormap (black to light green)
+colors = [(0, 0, 0), (0, 1, 0.5)]
 n_bins = 256
 cm = LinearSegmentedColormap.from_list('custom_green', colors, N=n_bins)
-colormaps.register(cm)
 
-# Permutation for visualization (swap dimensions)
-PERMUTE_ORDER = (2, 0, 1)  # [D, H, W] → [W, D, H]
+# Configuration
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CHECKPOINT_PATH = os.path.join(PARENT_DIR, "checkpoints", "best_autoencoder.pt")
+# THIS IS THE DATA_DIR in the original script. Let's make sure it's correct.
+# The path in the error message is '/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri'
+DATA_DIR = "/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri" 
+OUTPUT_DIR = os.path.join(PARENT_DIR, "eval", "brain_reconstructions")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+USE_VQ = True
+PATCH_SIZE = (64, 64, 64)
 
-# Plotting Functions
-def plot_slices(data, ax_row):
-    """Plots 8 evenly spaced slices from the fMRI scan."""
-    depth = data.shape[0]
-    step = depth // 8
-    indices = [i * step for i in range(8)]
-    for i, idx in enumerate(indices):
-        slice_data = (data[idx] - data[idx].min()) / (data[idx].max() - data[idx].min() + 1e-8)
-        ax_row[i].imshow(slice_data, cmap='custom_green', vmin=0, vmax=1)
-        ax_row[i].set_title(f"Depth {idx}")
-        ax_row[i].axis('off')
-
-def plot_mip(data, ax):
-    """Plots Maximum Intensity Projection (MIP)."""
-    mip = np.max(data, axis=0)
-    mip = (mip - mip.min()) / (mip.max() - mip.min() + 1e-8)
-    ax.imshow(mip, cmap='custom_green', vmin=0, vmax=1)
-    ax.set_title("MIP")
-    ax.axis('off')
+def plot_comparison(original, reconstructed, output_path, title):
+    """Plot original and reconstructed brain side by side"""
+    fig, axes = plt.subplots(2, 8, figsize=(20, 6))
+    
+    depth = original.shape[2]
+    slice_indices = np.linspace(0, depth-1, 8, dtype=int)
+    
+    for i, slice_idx in enumerate(slice_indices):
+        axes[0, i].imshow(original[:, :, slice_idx], cmap=cm, vmin=0, vmax=1)
+        axes[0, i].set_title(f"Slice {slice_idx}")
+        axes[0, i].axis('off')
+    
+    for i, slice_idx in enumerate(slice_indices):
+        axes[1, i].imshow(reconstructed[:, :, slice_idx], cmap=cm, vmin=0, vmax=1)
+        axes[1, i].axis('off')
+    
+    fig.text(0.01, 0.75, "Original", ha='left', va='center', fontsize=14, rotation=90)
+    fig.text(0.01, 0.25, "Reconstructed", ha='left', va='center', fontsize=14, rotation=90)
+    
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0.02, 0, 1, 0.95])
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+    return output_path
 
 def main():
-    """Evaluates the autoencoder on test data and saves visualizations."""
-    # Create timestamped directory
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    LOG_DIR = os.path.join(LOGS_DIR, f"autoencoder_test_{timestamp}")
-    os.makedirs(LOG_DIR, exist_ok=True)
-    ORIGINAL_DIR = os.path.join(LOG_DIR, "original_plots")
-    RECONSTRUCTED_DIR = os.path.join(LOG_DIR, "reconstructed_autoencoder_plots")
-    os.makedirs(ORIGINAL_DIR, exist_ok=True)
-    os.makedirs(RECONSTRUCTED_DIR, exist_ok=True)
-    print(f"Logging visualizations to {LOG_DIR}")
+    # Load the trained model
+    print(f"Loading model from {CHECKPOINT_PATH}")
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+    
+    model = Improved3DAutoencoder(
+        in_channels=1,
+        latent_channels=8,
+        base_channels=32,
+        use_vq=USE_VQ
+    ).to(DEVICE)
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    print("Model loaded successfully")
+    
+    # --- THIS IS THE CORRECTED SECTION ---
+    # Define the base path for the sample file
+    sample_base_path = os.path.join(DATA_DIR, '100307', 'tfMRI_MOTOR_RL')
+    sample_file = None
+    
+    # Check for both .nii and .nii.gz extensions
+    for ext in ['.nii', '.nii.gz']:
+        potential_path = sample_base_path + ext
+        if os.path.exists(potential_path):
+            sample_file = potential_path
+            print(f"Found sample file: {sample_file}")
+            break
+    # --- END OF CORRECTION ---
 
-    # Load the trained autoencoder
-    autoencoder = fMRIAutoencoder().to(DEVICE)
-    autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT, map_location=DEVICE))
-    autoencoder.eval()
-    print(f"Loaded autoencoder from {AUTOENCODER_CHECKPOINT}")
+    if sample_file is None:
+        print(f"Sample file not found at '{sample_base_path}.nii' or '{sample_base_path}.nii.gz'.")
+        print("Please verify your DATA_DIR path and that the subject '100307' exists.")
+        return
 
-    # DataModule for Test Data
-    data_module = FMRIDataModule(
-        train_csv=TEST_DATA,
-        val_csv=TEST_DATA,
-        test_csv=TEST_DATA,
-        data_dir=DATA_DIR,
-        batch_size=1,  # Always use batch size 1 for visualization
-        num_workers=0  
-    )
-    data_module.setup()
-    test_loader = data_module.test_dataloader()
+    print(f"Processing file: {os.path.basename(sample_file)}")
+    
+    try:
+        # Load fMRI data using nibabel
+        nii_img = nib.load(sample_file)
+        fmri_data = nii_img.get_fdata(dtype=np.float32)
+        
+        # Average over time if 4D
+        brain_data = np.mean(fmri_data, axis=3) if fmri_data.ndim == 4 else fmri_data
+        
+        # Normalize to [0, 1]
+        brain_data = (brain_data - brain_data.min()) / (brain_data.max() - brain_data.min())
+        
+        # Convert to a PyTorch tensor with batch and channel dimensions
+        original_tensor = torch.from_numpy(brain_data).float().unsqueeze(0).unsqueeze(0).to(DEVICE)
+        
+        # --- SLIDING WINDOW INFERENCE ---
+        with torch.no_grad():
+            # The predictor function must return only the reconstruction for sliding_window_inference
+            def predictor(x):
+                recon, _, _ = model(x)
+                return recon
 
-    # Get one sample
-    fmri_tensor, labels = next(iter(test_loader))
-    fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
-    label_value = labels.item()
+            reconstructed_tensor = sliding_window_inference(
+                inputs=original_tensor,
+                roi_size=PATCH_SIZE,
+                sw_batch_size=4,
+                predictor=predictor,
+                overlap=0.5,
+                mode="gaussian"
+            )
 
-    # Autoencoder Reconstruction
-    with torch.no_grad():
-        recon_autoencoder = autoencoder(fmri_tensor, labels)
+        # Convert tensors back to numpy for plotting
+        original_np = original_tensor.squeeze().cpu().numpy()
+        reconstructed_np = reconstructed_tensor.squeeze().cpu().numpy()
+        
+        print(f"Original shape (DxHxW): {original_np.shape}")
+        print(f"Reconstructed shape (DxHxW): {reconstructed_np.shape}")
+        
+        # Create unique filenames
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename_base = f"{os.path.basename(sample_file).split('.')[0]}_{timestamp}"
+        
+        # Plot comparison
+        print("Creating comparison view...")
+        comparison_path = os.path.join(OUTPUT_DIR, f"comparison_{filename_base}.png")
+        
+        # Nibabel loads as (H, W, D), but our PyTorch pipeline expects (D, H, W).
+        # We need to transpose back for plotting to match the original orientation.
+        # Let's assume the original nibabel data is (H, W, D) and our tensor is (D, H, W)
+        # So we transpose the numpy arrays for plotting
+        original_for_plot = np.transpose(original_np, (1, 2, 0))
+        reconstructed_for_plot = np.transpose(reconstructed_np, (1, 2, 0))
 
-    # Convert to NumPy for plotting
-    original = np.transpose(fmri_tensor.squeeze().cpu().numpy(), PERMUTE_ORDER)
-    recon_autoencoder = np.transpose(recon_autoencoder.squeeze().cpu().numpy(), PERMUTE_ORDER)
+        plot_comparison(
+            original_for_plot, 
+            reconstructed_for_plot,
+            comparison_path,
+            title=f"Brain Comparison - {os.path.basename(sample_file)}"
+        )
+        print(f"Comparison saved to {comparison_path}")
+            
+    except Exception as e:
+        print(f"Error processing file {sample_file}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\nVisualization complete!")
 
-    # Plot Original fMRI
-    fig, axes = plt.subplots(1, 9, figsize=(20, 2.5), gridspec_kw={'width_ratios': [1]*8 + [1.5]})
-    plot_slices(original, axes[:-1])
-    plot_mip(original, axes[-1])
-    plt.suptitle(f"Original fMRI (Label: {label_value})", fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    original_file = os.path.join(ORIGINAL_DIR, f"original_label_{label_value}.png")
-    plt.savefig(original_file)
-    plt.close()
-
-    # Plot Reconstructed fMRI
-    fig, axes = plt.subplots(1, 9, figsize=(20, 2.5), gridspec_kw={'width_ratios': [1]*8 + [1.5]})
-    plot_slices(recon_autoencoder, axes[:-1])
-    plot_mip(recon_autoencoder, axes[-1])
-    plt.suptitle(f"Reconstructed fMRI - Autoencoder (Label: {label_value})", fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    recon_autoencoder_file = os.path.join(RECONSTRUCTED_DIR, f"recon_autoencoder_label_{label_value}.png")
-    plt.savefig(recon_autoencoder_file)
-    plt.close()
-
-    print(f"Original plot saved to {original_file}")
-    print(f"Autoencoder reconstructed plot saved to {recon_autoencoder_file}")
-    print("Evaluation complete.")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

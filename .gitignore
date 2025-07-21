@@ -1,15 +1,18 @@
 # Ignore the specified folder and its contents
 Privat_FMRI_synthesis/checkpoints/
 Privat_FMRI_synthesis/checkpoints_New/
+Privat_FMRI_synthesis/checkpoints_autoencoder/
+Privat_FMRI_synthesis/checkpoints_diffusion/
 Privat_FMRI_synthesis/logs/
 Privat_FMRI_synthesis/visualizations/
-myenv/
 Privat_FMRI_synthesis/data/
+Privat_FMRI_synthesis/data_preprocessed/
 Privat_FMRI_synthesis/test_analysis/
+Privat_FMRI_synthesis/eval/brain_reconstructions/
+myenv/
 
 # Ignore Python virtual environment
 Privat_FMRI_synthesis/FMRI_synthesis/
-
 
 # Ignore common Python files
 __pycache__/
@@ -40,4 +43,3 @@ logs/
 
 # Ignore VS Code settings (if applicable)
 .vscode/
-Privat_FMRI_synthesis/data/

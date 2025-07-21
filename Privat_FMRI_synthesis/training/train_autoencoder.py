@@ -1,147 +1,310 @@
-import torch
-import torch.optim as optim
+#!/usr/bin/env python3
 import os
 import sys
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
-import random
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
-from torchmetrics.image import StructuralSimilarityIndexMeasure
+import random
+import logging
+import time
+from pathlib import Path
 
-# Get the parent directory of the training folder
-PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# Add parent directory to path
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PARENT_DIR)
 
-# Import configuration settings
-from config import *
-from models.autoencoder import fMRIAutoencoder
+# Import the model and dataset
+from models.autoencoder import Improved3DAutoencoder
 from utils.dataset import FMRIDataModule
 
-# Set random seed for reproducibility
+USE_MSSSIM = False  # Define this outside the try block
+HAS_MSSSIM = False  # Default to False
+
+try:
+    if USE_MSSSIM:  # Only import if we want to use it
+        from pytorch_msssim import MS_SSIM
+        HAS_MSSSIM = True
+except ImportError:
+    print("Warning: pytorch-msssim not found. Install with: pip install pytorch-msssim")
+    HAS_MSSSIM = False
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Config
+BATCH_SIZE = 16  # Can use larger batch size with optimized pipeline
+LEARNING_RATE = 1e-4
+EPOCHS = 100
+PATIENCE = 10
 SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-torch.cuda.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+USE_MIXED_PRECISION = True if torch.cuda.is_available() else False
+USE_VQ = True
 
-# Ensure directories exist
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-os.makedirs(LOGS_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOGS_DIR, "training_log.txt")
+# Set random seed
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-# Initialize model
-autoencoder = fMRIAutoencoder().to(DEVICE)
-if os.path.exists(AUTOENCODER_CHECKPOINT):
-    autoencoder.load_state_dict(torch.load(AUTOENCODER_CHECKPOINT))
-    print("✅ Loaded last saved model for crash recovery")
-
-# Define loss and optimizer
-criterion = torch.nn.MSELoss()
-optimizer = optim.Adam(autoencoder.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
-
-# Learning Rate Scheduler (Cosine Annealing)
-#scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS_AUTOENCODER, eta_min=5e-6)
-
-# Initialize Data Module
-data_module = FMRIDataModule(
-    train_csv=TRAIN_DATA,
-    val_csv=VAL_DATA,
-    test_csv=TEST_DATA,
-    data_dir=DATA_DIR,
-    batch_size=BATCH_SIZE,
-    num_workers=16
-)
-data_module.setup()
-train_loader = data_module.train_dataloader()
-val_loader = data_module.val_dataloader()
-
-# Training setup
-best_loss = float('inf')
-counter = 0
-patience = 10
-
-with open(LOG_FILE, "w") as log_file:
-    log_file.write("Epoch,Train Loss,Validation Loss,Train MSE,Train L1,Train SSIM,Val MSE,Val L1,Val SSIM\n")
-
-    for epoch in range(EPOCHS_AUTOENCODER):
-        autoencoder.train()
-        train_loss, train_mse, train_l1, train_ssim = 0, 0, 0, 0
-        print(f"Epoch {epoch + 1}/{EPOCHS_AUTOENCODER}")
-        progress_bar = tqdm(train_loader, desc=f"Training {epoch+1}/{EPOCHS_AUTOENCODER}")
+def train_autoencoder():
+    # Set random seed
+    set_seed(SEED)
+    
+    # Paths to preprocessed data
+    preprocessed_dir = os.path.join(PARENT_DIR, "data_preprocessed")
+    
+    # Checkpoint directory
+    checkpoint_dir = os.path.join(PARENT_DIR, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Initialize MS-SSIM if available
+    if HAS_MSSSIM:
+        msssim_module = MS_SSIM(
+            data_range=1.0,
+            win_size=7,
+            win_sigma=1.5,
+            channel=1,
+            spatial_dims=3,
+            K=(0.01, 0.03)
+        ).to(DEVICE)
         
-        for fmri_tensor, labels in progress_bar:
-            fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
-            recon = autoencoder(fmri_tensor, labels)
+        def msssim_loss(x, y):
+            return 1 - msssim_module(x, y)
+    else:
+        def msssim_loss(x, y):
+            return torch.tensor(0.0, device=x.device)
+    
+    # Create data module with patch dataset
+    data_module = FMRIDataModule(
+        train_csv=os.path.join(preprocessed_dir, "train_patches.csv"),
+        val_csv=os.path.join(preprocessed_dir, "val_patches.csv"),
+        test_csv=os.path.join(preprocessed_dir, "test_patches.csv"),
+        batch_size=BATCH_SIZE,
+        num_workers=16,  # Can use more workers with optimized dataset
+        prefetch_factor=4,
+        view='axial'
+    )
+    
+    # Setup data loaders
+    logger.info("Setting up data loaders...")
+    data_module.setup()
+    train_loader = data_module.train_dataloader()
+    val_loader = data_module.val_dataloader()
+    
+    # Create model
+    logger.info(f"Creating Improved 3D Autoencoder on {DEVICE}...")
+    model = Improved3DAutoencoder(
+        in_channels=1,
+        latent_channels=8,
+        base_channels=32,
+        use_vq=USE_VQ
+    ).to(DEVICE)
+    
+    # Define loss functions
+    mse_criterion = nn.MSELoss()
+    l1_criterion = nn.L1Loss()
+    
+    # Set up optimizer and scaler for mixed precision
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scaler = torch.amp.GradScaler('cuda') if USE_MIXED_PRECISION else None
+    
+    # For early stopping
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    # Training loop
+    logger.info("Starting training...")
+    for epoch in range(EPOCHS):
+        start_time = time.time()
+        
+        # Training
+        model.train()
+        train_loss = 0.0
+        train_recon_loss = 0.0
+        train_ssim_loss = 0.0
+        train_vq_loss = 0.0
+        
+        # Track batch processing time
+        batch_times = []
+        data_times = []
+        
+        for batch_idx, (data, _) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]")):
+            batch_start = time.time()
+            data_load_time = batch_start - (batch_times[-1] if batch_times else start_time)
+            data_times.append(data_load_time)
             
-            mse_loss = criterion(recon, fmri_tensor)
-            l1_loss = torch.nn.functional.l1_loss(recon, fmri_tensor)
-            ssim_loss = 1 - ssim(recon, fmri_tensor)
-            loss = 0.5 * mse_loss + 0.2 * l1_loss + 0.3 * ssim_loss
+            data = data.to(DEVICE)
             
+            # Forward pass with mixed precision
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            
+            if USE_MIXED_PRECISION:
+                with torch.amp.autocast('cuda'):
+                    if USE_VQ:
+                        recon, _, vq_loss = model(data)
+                    else:
+                        recon, _ = model(data)
+                        vq_loss = 0
+                    
+                    # Compute losses
+                    mse_loss = mse_criterion(recon, data)
+                    l1_loss = l1_criterion(recon, data)
+                    ssim_loss = msssim_loss(recon, data) if HAS_MSSSIM else torch.tensor(0.0, device=DEVICE)
+                    
+                    # Combined loss
+                    loss = 0.5 * mse_loss + 0.3 * l1_loss
+                    if HAS_MSSSIM:
+                        loss += 0.2 * ssim_loss
+                    if USE_VQ:
+                        loss += 0.1 * vq_loss
+                
+                # Backward pass with gradient scaling
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Standard forward pass
+                if USE_VQ:
+                    recon, _, vq_loss = model(data)
+                else:
+                    recon, _ = model(data)
+                    vq_loss = 0
+                
+                # Compute losses
+                mse_loss = mse_criterion(recon, data)
+                l1_loss = l1_criterion(recon, data)
+                ssim_loss = msssim_loss(recon, data) if HAS_MSSSIM else torch.tensor(0.0, device=DEVICE)
+                
+                # Combined loss
+                loss = 0.5 * mse_loss + 0.3 * l1_loss
+                if HAS_MSSSIM:
+                    loss += 0.2 * ssim_loss
+                if USE_VQ:
+                    loss += 0.1 * vq_loss
+                
+                # Standard backward pass
+                loss.backward()
+                optimizer.step()
             
             train_loss += loss.item()
-            train_mse += mse_loss.item()
-            train_l1 += l1_loss.item()
-            train_ssim += ssim_loss.item()
-            progress_bar.set_postfix(loss=f"{loss.item():.4f}")
-
-        train_loss /= len(train_loader)
-        train_mse /= len(train_loader)
-        train_l1 /= len(train_loader)
-        train_ssim /= len(train_loader)
-        print(f"Epoch {epoch + 1} completed - Avg Train Loss: {train_loss:.4f}, MSE: {train_mse:.4f}, L1: {train_l1:.4f}, SSIM: {train_ssim:.4f}")
-        # Update Learning Rate Scheduler
-        #scheduler.step()
-        #print(f"🔄 LR Updated: {scheduler.get_last_lr()[0]:.6f}")
-      
-        # Validation Phase
-        autoencoder.eval()
-        val_loss, val_mse, val_l1, val_ssim = 0, 0, 0, 0
-        val_bar = tqdm(val_loader, desc=f"Validating {epoch+1}/{EPOCHS_AUTOENCODER}")
+            train_recon_loss += (mse_loss.item() + l1_loss.item()) / 2
+            train_ssim_loss += ssim_loss.item() if HAS_MSSSIM else 0
+            train_vq_loss += vq_loss.item() if USE_VQ else 0
+            
+            # Track batch processing time
+            batch_end = time.time()
+            batch_time = batch_end - batch_start
+            batch_times.append(batch_time)
+            
+            # Print timing info every 10 batches
+            if (batch_idx + 1) % 10 == 0:
+                avg_batch_time = sum(batch_times[-10:]) / 10
+                avg_data_time = sum(data_times[-10:]) / 10
+                # logger.info(f"Batch {batch_idx+1}: avg batch time {avg_batch_time:.4f}s, avg data time {avg_data_time:.4f}s")
+        
+        # Calculate average training losses
+        num_batches = len(train_loader)
+        train_loss /= num_batches
+        train_recon_loss /= num_batches
+        train_ssim_loss /= num_batches
+        train_vq_loss /= num_batches
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+        val_recon_loss = 0.0
+        val_ssim_loss = 0.0
+        val_vq_loss = 0.0
+        
         with torch.no_grad():
-            for fmri_tensor, labels in val_bar:
-                fmri_tensor, labels = fmri_tensor.to(DEVICE), labels.to(DEVICE)
-                recon = autoencoder(fmri_tensor, labels)
+            for data, _ in tqdm(val_loader, desc=f"Epoch {epoch+1}/{EPOCHS} [Val]"):
+                data = data.to(DEVICE)
                 
-                mse_loss = criterion(recon, fmri_tensor)
-                l1_loss = torch.nn.functional.l1_loss(recon, fmri_tensor)
-                ssim_loss = 1 - ssim(recon, fmri_tensor)
-                loss = 0.5 * mse_loss + 0.2 * l1_loss + 0.3 * ssim_loss
+                if USE_VQ:
+                    recon, _, vq_loss = model(data)
+                else:
+                    recon, _ = model(data)
+                    vq_loss = 0
+                
+                # Compute losses
+                mse_loss = mse_criterion(recon, data)
+                l1_loss = l1_criterion(recon, data)
+                ssim_loss = msssim_loss(recon, data) if HAS_MSSSIM else torch.tensor(0.0, device=DEVICE)
+                
+                # Combined loss
+                loss = 0.5 * mse_loss + 0.3 * l1_loss
+                if HAS_MSSSIM:
+                    loss += 0.2 * ssim_loss
+                if USE_VQ:
+                    loss += 0.1 * vq_loss
                 
                 val_loss += loss.item()
-                val_mse += mse_loss.item()
-                val_l1 += l1_loss.item()
-                val_ssim += ssim_loss.item()
-                val_bar.set_postfix(loss=f"{loss.item():.4f}")
-
-        val_loss /= len(val_loader)
-        val_mse /= len(val_loader)
-        val_l1 /= len(val_loader)
-        val_ssim /= len(val_loader)
-        print(f"Epoch {epoch + 1} - Avg Validation Loss: {val_loss:.4f}, MSE: {val_mse:.4f}, L1: {val_l1:.4f}, SSIM: {val_ssim:.4f}")
-
-        # Log losses
-        log_file.write(f"{epoch+1},{train_loss:.4f},{val_loss:.4f},{train_mse:.4f},{train_l1:.4f},{train_ssim:.4f},{val_mse:.4f},{val_l1:.4f},{val_ssim:.4f}\n")
-        log_file.flush()
-
-        # Save best model
-        if val_loss < best_loss:
-            best_loss = val_loss
-            counter = 0
-            torch.save(autoencoder.state_dict(), AUTOENCODER_CHECKPOINT)
-            print("✅ Best model updated!")
+                val_recon_loss += (mse_loss.item() + l1_loss.item()) / 2
+                val_ssim_loss += ssim_loss.item() if HAS_MSSSIM else 0
+                val_vq_loss += vq_loss.item() if USE_VQ else 0
+        
+        # Calculate average validation losses
+        num_val_batches = len(val_loader)
+        val_loss /= num_val_batches
+        val_recon_loss /= num_val_batches
+        val_ssim_loss /= num_val_batches
+        val_vq_loss /= num_val_batches
+        
+        # Print epoch summary
+        epoch_time = time.time() - start_time
+        avg_batch_time = sum(batch_times) / len(batch_times) if batch_times else 0
+        avg_data_time = sum(data_times) / len(data_times) if data_times else 0
+        
+        logger.info(f"Epoch {epoch+1}/{EPOCHS} completed in {epoch_time:.2f}s")
+        logger.info(f"Average batch processing time: {avg_batch_time:.4f}s")
+        logger.info(f"Average data loading time: {avg_data_time:.4f}s")
+        logger.info(f"Train Loss: {train_loss:.6f} (Recon: {train_recon_loss:.6f}, SSIM: {train_ssim_loss:.6f}, VQ: {train_vq_loss:.6f})")
+        logger.info(f"Val Loss: {val_loss:.6f} (Recon: {val_recon_loss:.6f}, SSIM: {val_ssim_loss:.6f}, VQ: {val_vq_loss:.6f})")
+        
+        # Save model if it's the best so far
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            
+            # Save the best model
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'val_recon_loss': val_recon_loss,
+                'val_ssim_loss': val_ssim_loss,
+                'val_vq_loss': val_vq_loss,
+            }, os.path.join(checkpoint_dir, 'best_autoencoder.pt'))
+            
+            logger.info(f"New best model saved with validation loss: {val_loss:.6f}")
         else:
-            counter += 1
-            print(f"Patience counter: {counter}/{patience}")
-            if counter >= patience:
-                print("🚨 Early stopping triggered!")
+            patience_counter += 1
+            logger.info(f"Validation loss did not improve. Patience: {patience_counter}/{PATIENCE}")
+            
+            # Early stopping
+            if patience_counter >= PATIENCE:
+                logger.info(f"Early stopping triggered after {epoch+1} epochs")
                 break
+        
+        # Save latest model
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': val_loss,
+        }, os.path.join(checkpoint_dir, 'latest_autoencoder.pt'))
+    
+    logger.info("Training completed!")
+    logger.info(f"Best validation loss: {best_val_loss:.6f}")
 
-print(f"✅ Training complete. Best model saved at: {AUTOENCODER_CHECKPOINT}")
+if __name__ == "__main__":
+    train_autoencoder()
