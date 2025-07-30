@@ -9,6 +9,10 @@ Privat_FMRI_synthesis/data/
 Privat_FMRI_synthesis/data_preprocessed/
 Privat_FMRI_synthesis/test_analysis/
 Privat_FMRI_synthesis/eval/brain_reconstructions/
+Privat_FMRI_synthesis/checkpoints_adversarial/
+Privat_FMRI_synthesis/checkpoints_diffusion_cfg/
+Privat_FMRI_synthesis/checkpoints_finetuned/
+Privat_FMRI_synthesis/evaluation/
 myenv/
 
 # Ignore Python virtual environment
