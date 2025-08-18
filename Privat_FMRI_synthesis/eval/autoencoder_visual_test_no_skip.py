@@ -18,7 +18,7 @@ PARENT_DIR = SCRIPT_DIR.parent
 sys.path.append(str(PARENT_DIR))
 
 # Models and dataset
-from models.autoencoder import Improved3DAutoencoder
+from models.autoencoder_noskip import NoSkipAutoencoder
 from utils.dataset import FMRIDataModule
 
 # --- Configuration ---
@@ -30,7 +30,7 @@ DATA_DIR = Path("/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat
 TEST_CSV = Path("/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/data_preprocessed/test_patches.csv")
 ORIGINAL_DATA_DIR = Path("/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri")
 
-OUTPUT_DIR = PARENT_DIR / "eval" / "brain_reconstructions_skip_model_no_skips"
+OUTPUT_DIR = PARENT_DIR / "eval" / "brain_reconstructions_noskip_model"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Sliding window settings (same as predict)
@@ -68,18 +68,20 @@ def load_model():
     print(f"Loading model from: {MODEL_PATH}")
     ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
 
-    # Read hyperparams if present, else use defaults for Improved3DAutoencoder
-    latent_channels = ckpt.get('latent_channels', 8)
+    # Read hyperparams if present, else use defaults for NoSkipAutoencoder
+    latent_channels = ckpt.get('latent_channels', 16)
     base_channels = ckpt.get('base_channels', 32)
     use_vq = ckpt.get('use_vq', True)
-    num_vq_embeddings = ckpt.get('num_vq_embeddings', 512)
+    num_vq_embeddings = ckpt.get('num_vq_embeddings', 1024)
+    use_positional_encoding = ckpt.get('use_positional_encoding', True)
 
-    model = Improved3DAutoencoder(
+    model = NoSkipAutoencoder(
         in_channels=1,
         latent_channels=latent_channels,
         base_channels=base_channels,
         use_vq=use_vq,
-        num_vq_embeddings=num_vq_embeddings
+        num_vq_embeddings=num_vq_embeddings,
+        use_positional_encoding=use_positional_encoding
     ).to(DEVICE)
 
     state_dict = ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt
@@ -88,7 +90,8 @@ def load_model():
 
     print(f"Model loaded. "
           f"latent_channels={latent_channels}, base_channels={base_channels}, "
-          f"use_vq={use_vq}, num_vq_embeddings={num_vq_embeddings}")
+          f"use_vq={use_vq}, num_vq_embeddings={num_vq_embeddings}, "
+          f"use_positional_encoding={use_positional_encoding}")
     return model
 
 def main():
@@ -134,15 +137,11 @@ def main():
     # Predictor for sliding_window_inference
     @torch.no_grad()
     def predictor(x):
-        # x is (B,C,W,H,D) patch
-        # Encode to get latent representation
+        # x is (B,C,W,H,D) patch - NoSkipAutoencoder expects this format
         if model.use_vq:
-            z, vq_loss, skip_features = model.encode(x)
+            recon, _, _ = model(x)  # Returns (recon, z, vq_loss)
         else:
-            z, _, skip_features = model.encode(x)
-        
-        # Decode WITHOUT skip connections by passing None
-        recon = model.decode(z, skip_features=None)
+            recon, _ = model(x)  # Returns (recon, z)
         return recon
 
     print(f"Running sliding window inference with ROI size: {ROI_SIZE}...")
@@ -196,14 +195,14 @@ def main():
     
     plot_slices(hr_np, OUTPUT_DIR / f"{basename}_{timestamp}_1_original.png", 
                 "Original fMRI")
-    plot_slices(recon_np, OUTPUT_DIR / f"{basename}_{timestamp}_2_reconstructed_skip_model_no_skips.png", 
-                "Autoencoder Reconstruction (Skip Model - No Skip Connections Used)")
+    plot_slices(recon_np, OUTPUT_DIR / f"{basename}_{timestamp}_2_reconstructed_noskip_model.png", 
+                "NoSkip Autoencoder Reconstruction")
     
     print("\n=== AUTOENCODER VISUALIZATION COMPLETE ===")
     print("Generated two images for comparison:")
     print(f"1. Original:      {OUTPUT_DIR}/{basename}_{timestamp}_1_original.png")
-    print(f"2. Reconstructed: {OUTPUT_DIR}/{basename}_{timestamp}_2_reconstructed_skip_model_no_skips.png")
-    print(f"Current Date and Time (UTC): 2025-08-11 14:07:37")
+    print(f"2. Reconstructed: {OUTPUT_DIR}/{basename}_{timestamp}_2_reconstructed_noskip_model.png")
+    print(f"Current Date and Time (UTC): 2025-08-16 18:03:40")
     print(f"Current User's Login: SajbenDani")
 
 if __name__ == "__main__":

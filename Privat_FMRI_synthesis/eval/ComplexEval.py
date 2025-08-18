@@ -24,21 +24,22 @@ from diffusers import DDPMScheduler
 
 # --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-AUTOENCODER_PATH = PARENT_DIR / "checkpoints_adversarial" / "best_finetuned_adversarial_autoencoder.pt"
-#DIFFUSION_PATH = PARENT_DIR / "checkpoints_diffusion" / "best_diffusion.pt"
+AUTOENCODER_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_adversarial/best_finetuned_adversarial_autoencoder.pt"
 DIFFUSION_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_diffusion_cfg/best_diffusion_cfg.pt"
 PREPROCESSED_DIR = PARENT_DIR / "data_preprocessed"
 OUTPUT_DIR = PARENT_DIR / "evaluation"
-RESULTS_FILE = OUTPUT_DIR / f"numeric_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+RESULTS_FILE = OUTPUT_DIR / f"numeric_results_cfg_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
+# Model parameters
 LATENT_CHANNELS = 8
 BASE_CHANNELS = 32
 DIFFUSION_BASE_CHANNELS = 128
 SCALE_FACTOR = 2
-NUM_INFERENCE_STEPS = 250
+NUM_INFERENCE_STEPS = 1000  # Full 1000 steps for maximum quality
 BATCH_SIZE = 4
 VIEW = 'axial'
-MAX_BATCHES = 750  # ~3000 samples
+MAX_BATCHES = 100  # 750 = ~3000 samples
+GUIDANCE_SCALE = 5.0  # CFG guidance scale
 
 def compute_metrics(prediction, target):
     """Compute PSNR and SSIM between prediction and target."""
@@ -81,7 +82,8 @@ def compute_metrics(prediction, target):
     try:
         psnr_value = psnr(target_np, pred_np, data_range=data_range)
         ssim_value = ssim(target_np, pred_np, data_range=data_range, channel_axis=None)
-    except Exception:
+    except Exception as e:
+        print(f"[WARNING] Metric calculation failed: {e}")
         return 0.0, 0.0
     
     return psnr_value, ssim_value
@@ -97,10 +99,14 @@ def main():
     
     print(f"[INFO] Device: {DEVICE}")
     print(f"[INFO] Target: {MAX_BATCHES * BATCH_SIZE} samples")
+    print(f"[INFO] Using CFG with guidance scale: {GUIDANCE_SCALE}")
+    print(f"[INFO] Using {NUM_INFERENCE_STEPS} diffusion steps")
+    print(f"[INFO] Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"[INFO] User: SajbenDani")
     
     # Load models
     try:
-        # Autoencoder
+        # Autoencoder - using adversarially trained model
         autoencoder = Improved3DAutoencoder(
             in_channels=1,
             latent_channels=LATENT_CHANNELS, 
@@ -109,10 +115,14 @@ def main():
         ).to(DEVICE)
         
         autoencoder_ckpt = torch.load(AUTOENCODER_PATH, map_location=DEVICE)
-        autoencoder.load_state_dict(autoencoder_ckpt['model_state_dict'])
+        if 'model_state_dict' in autoencoder_ckpt:
+            autoencoder.load_state_dict(autoencoder_ckpt['model_state_dict'])
+        else:
+            autoencoder.load_state_dict(autoencoder_ckpt)
         autoencoder.eval()
+        print(f"[INFO] Loaded adversarially fine-tuned autoencoder from {AUTOENCODER_PATH}")
         
-        # Diffusion model
+        # Diffusion model - using CFG-trained model
         diffusion_model = DiffusionUNet3D(
             latent_channels=LATENT_CHANNELS,
             base_channels=DIFFUSION_BASE_CHANNELS,
@@ -126,6 +136,7 @@ def main():
             diffusion_model.load_state_dict(diffusion_ckpt)
         
         diffusion_model.eval()
+        print(f"[INFO] Loaded CFG-trained diffusion model from {DIFFUSION_PATH}")
 
         # Noise scheduler
         noise_scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="squaredcos_cap_v2")
@@ -133,6 +144,8 @@ def main():
         
     except Exception as e:
         print(f"[ERROR] Failed to load models: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
     # Load test data
@@ -187,17 +200,34 @@ def main():
                 recon_no_skips = autoencoder.decode(z_real.detach(), skip_features=None)
                 recon_no_skips = ensure_same_size(recon_no_skips, hr_patches)
 
-                # 3. LDM super-resolution
+                # 3. LDM super-resolution with Classifier-Free Guidance
                 z_lr, _, _ = autoencoder.encode(lr_patches)
                 z_lr_upsampled = F.interpolate(z_lr, size=z_real.shape[2:], mode='trilinear', align_corners=False)
                 
-                # Diffusion sampling
+                # Create null conditioning for unconditional path
+                null_conditioning = torch.zeros_like(z_lr_upsampled).to(DEVICE)
+                
+                # Diffusion sampling with CFG
                 latents_gen = torch.randn_like(z_real).to(DEVICE)
-                for t in noise_scheduler.timesteps:
+                
+                # Use progress bar for diffusion steps
+                diffusion_bar = tqdm(noise_scheduler.timesteps, desc=f"Batch {batch_idx+1} diffusion", leave=False)
+                for t in diffusion_bar:
                     t_tensor = t.unsqueeze(0).to(DEVICE)
-                    noise_pred = diffusion_model(latents_gen, t_tensor, z_lr_upsampled)
+                    
+                    # Get unconditional prediction
+                    noise_pred_uncond = diffusion_model(latents_gen, t_tensor, null_conditioning)
+                    
+                    # Get conditional prediction
+                    noise_pred_cond = diffusion_model(latents_gen, t_tensor, z_lr_upsampled)
+                    
+                    # Combine with guidance scale
+                    noise_pred = noise_pred_uncond + GUIDANCE_SCALE * (noise_pred_cond - noise_pred_uncond)
+                    
+                    # Perform denoising step
                     latents_gen = noise_scheduler.step(noise_pred, t, latents_gen).prev_sample
                 
+                # Decode generated latents using the adversarially trained decoder (no skip connections)
                 sr_images = autoencoder.decode(latents_gen, skip_features=None)
                 sr_images = ensure_same_size(sr_images, hr_patches)
 
@@ -232,23 +262,58 @@ def main():
                 
             except Exception as e:
                 print(f"[ERROR] Batch {batch_idx} failed: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
                 
-            # Progress indicator every 100 batches
-            if (batch_idx + 1) % 100 == 0:
-                print(f"[INFO] Processed {sample_count} samples")
+            # Progress indicator every 10 batches (since processing is slower with 1000 steps)
+            if (batch_idx + 1) % 10 == 0:
+                elapsed_time = (datetime.now() - start_time).total_seconds()
+                hours, remainder = divmod(elapsed_time, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                eta = elapsed_time / (batch_idx + 1) * (MAX_BATCHES - batch_idx - 1)
+                eta_h, eta_remainder = divmod(eta, 3600)
+                eta_m, eta_s = divmod(eta_remainder, 60)
+                
+                print(f"[INFO] Processed {sample_count} samples in {int(hours)}h {int(minutes)}m {int(seconds)}s")
+                print(f"[INFO] Estimated time remaining: {int(eta_h)}h {int(eta_m)}m {int(eta_s)}s")
+                
+                # Save interim results every 50 batches
+                if (batch_idx + 1) % 50 == 0:
+                    interim_results = calculate_results(metrics, sample_count, start_time)
+                    interim_file = OUTPUT_DIR / f"interim_results_batch_{batch_idx+1}.json"
+                    with open(interim_file, 'w') as f:
+                        json.dump(interim_results, f, indent=2)
+                    print(f"[INFO] Saved interim results to: {interim_file}")
 
-    # Calculate final metrics
+    # Calculate and save final results
+    final_results = calculate_results(metrics, sample_count, start_time)
+    with open(RESULTS_FILE, 'w') as f:
+        json.dump(final_results, f, indent=2)
+    
+    # Print summary
+    print_summary(final_results)
+    print(f"\nResults saved to: {RESULTS_FILE}")
+
+def calculate_results(metrics, sample_count, start_time):
+    """Calculate all metrics and prepare the results dictionary."""
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
+    hours, remainder = divmod(duration, 3600)
+    minutes, seconds = divmod(remainder, 60)
     
     results = {
         "meta": {
             "samples": sample_count,
             "evaluation_time_seconds": duration,
-            "samples_per_second": sample_count / duration,
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "user": "SajbenDani"
+            "evaluation_time_formatted": f"{int(hours)}h {int(minutes)}m {int(seconds)}s",
+            "samples_per_second": sample_count / duration if duration > 0 else 0,
+            "date": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "user": "SajbenDani",
+            "guidance_scale": GUIDANCE_SCALE,
+            "inference_steps": NUM_INFERENCE_STEPS,
+            "autoencoder": str(AUTOENCODER_PATH),
+            "diffusion_model": str(DIFFUSION_PATH)
         },
         "metrics": {}
     }
@@ -256,32 +321,50 @@ def main():
     # Process metrics
     for key, value in metrics.items():
         if key != "latent_stats":
-            avg_psnr = np.mean(value["psnr"])
-            avg_ssim = np.mean(value["ssim"])
-            std_psnr = np.std(value["psnr"])
-            std_ssim = np.std(value["ssim"])
-            
-            results["metrics"][key] = {
-                "psnr_mean": float(avg_psnr),
-                "psnr_std": float(std_psnr),
-                "ssim_mean": float(avg_ssim),
-                "ssim_std": float(std_ssim)
-            }
+            if value["psnr"]:  # Check if there are any values
+                avg_psnr = np.mean(value["psnr"])
+                avg_ssim = np.mean(value["ssim"])
+                std_psnr = np.std(value["psnr"])
+                std_ssim = np.std(value["ssim"])
+                
+                results["metrics"][key] = {
+                    "psnr_mean": float(avg_psnr),
+                    "psnr_std": float(std_psnr),
+                    "ssim_mean": float(avg_ssim),
+                    "ssim_std": float(std_ssim)
+                }
+            else:
+                results["metrics"][key] = {
+                    "psnr_mean": 0.0,
+                    "psnr_std": 0.0,
+                    "ssim_mean": 0.0,
+                    "ssim_std": 0.0
+                }
     
     # Latent statistics
-    real_mean = np.mean(metrics["latent_stats"]["real_mean"])
-    real_std = np.mean(metrics["latent_stats"]["real_std"])
-    gen_mean = np.mean(metrics["latent_stats"]["gen_mean"])
-    gen_std = np.mean(metrics["latent_stats"]["gen_std"])
-    
-    results["metrics"]["latent_stats"] = {
-        "real_mean": float(real_mean),
-        "real_std": float(real_std),
-        "gen_mean": float(gen_mean),
-        "gen_std": float(gen_std),
-        "mean_diff_pct": float(abs((gen_mean - real_mean) / (real_mean if real_mean != 0 else 1e-5)) * 100),
-        "std_diff_pct": float(abs((gen_std - real_std) / (real_std if real_std != 0 else 1e-5)) * 100)
-    }
+    if metrics["latent_stats"]["real_mean"]:
+        real_mean = np.mean(metrics["latent_stats"]["real_mean"])
+        real_std = np.mean(metrics["latent_stats"]["real_std"])
+        gen_mean = np.mean(metrics["latent_stats"]["gen_mean"])
+        gen_std = np.mean(metrics["latent_stats"]["gen_std"])
+        
+        results["metrics"]["latent_stats"] = {
+            "real_mean": float(real_mean),
+            "real_std": float(real_std),
+            "gen_mean": float(gen_mean),
+            "gen_std": float(gen_std),
+            "mean_diff_pct": float(abs((gen_mean - real_mean) / (real_mean if real_mean != 0 else 1e-5)) * 100),
+            "std_diff_pct": float(abs((gen_std - real_std) / (real_std if real_std != 0 else 1e-5)) * 100)
+        }
+    else:
+        results["metrics"]["latent_stats"] = {
+            "real_mean": 0.0,
+            "real_std": 0.0,
+            "gen_mean": 0.0,
+            "gen_std": 0.0,
+            "mean_diff_pct": 0.0,
+            "std_diff_pct": 0.0
+        }
     
     # Comparative metrics
     ae_with_skips_psnr = results["metrics"]["ae_recon_with_skips"]["psnr_mean"]
@@ -291,33 +374,46 @@ def main():
     
     results["metrics"]["comparative"] = {
         "skip_vs_noskip_psnr_diff": float(ae_with_skips_psnr - ae_no_skips_psnr),
-        "skip_vs_noskip_psnr_pct": float((ae_with_skips_psnr - ae_no_skips_psnr) / ae_with_skips_psnr * 100),
+        "skip_vs_noskip_psnr_pct": float((ae_with_skips_psnr - ae_no_skips_psnr) / max(ae_with_skips_psnr, 1e-5) * 100),
         "ldm_vs_bicubic_psnr_diff": float(ldm_psnr - bicubic_psnr),
-        "ldm_vs_bicubic_psnr_pct": float((ldm_psnr - bicubic_psnr) / bicubic_psnr * 100)
+        "ldm_vs_bicubic_psnr_pct": float((ldm_psnr - bicubic_psnr) / max(bicubic_psnr, 1e-5) * 100)
     }
     
-    # Save results to JSON file
-    with open(RESULTS_FILE, 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    # Print summary
+    return results
+
+def print_summary(results):
+    """Print a summary of the evaluation results."""
     print("\n=== EVALUATION SUMMARY ===")
-    print(f"Samples: {sample_count}")
-    print(f"Time: {duration:.2f} seconds ({sample_count/duration:.2f} samples/sec)")
+    print(f"Samples: {results['meta']['samples']}")
+    print(f"Time: {results['meta']['evaluation_time_formatted']} ({results['meta']['samples_per_second']:.2f} samples/sec)")
+    print(f"CFG Guidance Scale: {results['meta']['guidance_scale']}")
+    print(f"Diffusion Steps: {results['meta']['inference_steps']}")
+    
+    # Quality metrics
     print("\nQUALITY METRICS (PSNR)")
-    print(f"AE with skips:     {ae_with_skips_psnr:.4f}")
-    print(f"AE without skips:  {ae_no_skips_psnr:.4f}")
-    print(f"Bicubic baseline:  {bicubic_psnr:.4f}")
-    print(f"LDM super-res:     {ldm_psnr:.4f}")
+    print(f"AE with skips:     {results['metrics']['ae_recon_with_skips']['psnr_mean']:.4f}")
+    print(f"AE without skips:  {results['metrics']['ae_recon_no_skips']['psnr_mean']:.4f}")
+    print(f"Bicubic baseline:  {results['metrics']['bicubic_baseline']['psnr_mean']:.4f}")
+    print(f"LDM super-res:     {results['metrics']['ldm_super_res']['psnr_mean']:.4f}")
+    
+    # SSIM metrics
+    print("\nQUALITY METRICS (SSIM)")
+    print(f"AE with skips:     {results['metrics']['ae_recon_with_skips']['ssim_mean']:.4f}")
+    print(f"AE without skips:  {results['metrics']['ae_recon_no_skips']['ssim_mean']:.4f}")
+    print(f"Bicubic baseline:  {results['metrics']['bicubic_baseline']['ssim_mean']:.4f}")
+    print(f"LDM super-res:     {results['metrics']['ldm_super_res']['ssim_mean']:.4f}")
+    
+    # Latent statistics
     print("\nLATENT STATS")
-    print(f"Real latents:      mean={real_mean:.4f}, std={real_std:.4f}")
-    print(f"Generated latents: mean={gen_mean:.4f}, std={gen_std:.4f}")
+    print(f"Real latents:      mean={results['metrics']['latent_stats']['real_mean']:.4f}, std={results['metrics']['latent_stats']['real_std']:.4f}")
+    print(f"Generated latents: mean={results['metrics']['latent_stats']['gen_mean']:.4f}, std={results['metrics']['latent_stats']['gen_std']:.4f}")
     print(f"Mean difference:   {results['metrics']['latent_stats']['mean_diff_pct']:.2f}%")
     print(f"Std difference:    {results['metrics']['latent_stats']['std_diff_pct']:.2f}%")
+    
+    # Comparative analysis
     print("\nCOMPARATIVE ANALYSIS")
     print(f"Skip vs no-skip:   {results['metrics']['comparative']['skip_vs_noskip_psnr_diff']:.2f}dB ({results['metrics']['comparative']['skip_vs_noskip_psnr_pct']:.2f}%)")
     print(f"LDM vs bicubic:    {results['metrics']['comparative']['ldm_vs_bicubic_psnr_diff']:.2f}dB ({results['metrics']['comparative']['ldm_vs_bicubic_psnr_pct']:.2f}%)")
-    print(f"\nResults saved to: {RESULTS_FILE}")
 
 if __name__ == "__main__":
     main()
