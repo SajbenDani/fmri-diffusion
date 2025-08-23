@@ -1,14 +1,22 @@
 # Ignore the specified folder and its contents
 Privat_FMRI_synthesis/checkpoints/
 Privat_FMRI_synthesis/checkpoints_New/
+Privat_FMRI_synthesis/checkpoints_adversarial/
 Privat_FMRI_synthesis/checkpoints_autoencoder/
 Privat_FMRI_synthesis/checkpoints_diffusion/
+Privat_FMRI_synthesis/checkpoints_diffusion_cfg/
+Privat_FMRI_synthesis/checkpoints_finetuned/
 Privat_FMRI_synthesis/logs/
 Privat_FMRI_synthesis/visualizations/
 Privat_FMRI_synthesis/data/
 Privat_FMRI_synthesis/data_preprocessed/
 Privat_FMRI_synthesis/test_analysis/
 Privat_FMRI_synthesis/eval/brain_reconstructions/
+Privat_FMRI_synthesis/eval/brain_reconstructions_noskip/
+Privat_FMRI_synthesis/eval/brain_reconstructions_noskip_model/
+Privat_FMRI_synthesis/eval/brain_reconstructions_original_model/
+Privat_FMRI_synthesis/eval/brain_reconstructions_skip_model_no_skips/
+Privat_FMRI_synthesis/eval/brain_reconstructions_adversial/
 Privat_FMRI_synthesis/checkpoints_adversarial/
 Privat_FMRI_synthesis/checkpoints_diffusion_cfg/
 Privat_FMRI_synthesis/checkpoints_finetuned/

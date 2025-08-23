@@ -23,9 +23,9 @@ from models.diffusion import DiffusionUNet3D
 # --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Use the adversarially trained autoencoder
-AUTOENCODER_PATH = PARENT_DIR / "checkpoints_finetuned" / "best_finetuned_autoencoder.pt"
+AUTOENCODER_PATH = PARENT_DIR / "checkpoints_adversarial" / "best_finetuned_adversarial_autoencoder_second.pt"
 # Use CFG-finetuned diffusion model
-DIFFUSION_PATH = PARENT_DIR / "checkpoints_diffusion" / "best_diffusion.pt"
+DIFFUSION_PATH = PARENT_DIR / "checkpoints_diffusion_cfg" / "best_diffusion_cfg_adversarial_aligned.pt"
 OUTPUT_DIR = PARENT_DIR / "logs"
 ORIGINAL_DATA_DIR = Path("/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri")
 
@@ -33,9 +33,9 @@ ORIGINAL_DATA_DIR = Path("/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri")
 LATENT_CHANNELS = 8
 BASE_CHANNELS = 32
 SCALE_FACTOR = 2
-NUM_INFERENCE_STEPS = 500  # Full 1000 steps for highest quality
+NUM_INFERENCE_STEPS = 1000  # Full 1000 steps for highest quality
 ROI_SIZE_HR = (64, 64, 64) 
-GUIDANCE_SCALE = 0 #7.5  # CFG guidance scale - a higher value can increase sharpness
+GUIDANCE_SCALE = 7.5 #7.5  # CFG guidance scale - a higher value can increase sharpness
 
 # Define custom colormap
 colors = [(0, 0, 0), (0, 1, 0.5)]

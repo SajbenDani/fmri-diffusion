@@ -24,13 +24,13 @@ from utils.dataset import FMRIDataModule
 # --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MODEL_PATH = Path("/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_autoencoder/Last_autoencoder_without_skips.pt")
+MODEL_PATH = Path("/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_finetuned/best_finetuned_autoencoder.pt")
 
 DATA_DIR = Path("/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/data_preprocessed/test")
 TEST_CSV = Path("/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/data_preprocessed/test_patches.csv")
 ORIGINAL_DATA_DIR = Path("/home/jovyan/work/ssd0/USERS/siposlevente/data/fmri")
 
-OUTPUT_DIR = PARENT_DIR / "eval" / "brain_reconstructions_skip_model_no_skips"
+OUTPUT_DIR = PARENT_DIR / "eval" / "brain_reconstructions_adversial"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Sliding window settings (same as predict)

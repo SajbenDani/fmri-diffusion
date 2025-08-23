@@ -24,8 +24,8 @@ from diffusers import DDPMScheduler
 
 # --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-AUTOENCODER_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_adversarial/best_finetuned_adversarial_autoencoder.pt"
-DIFFUSION_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_diffusion_cfg/best_diffusion_cfg.pt"
+AUTOENCODER_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_finetuned/best_finetuned_autoencoder.pt"
+DIFFUSION_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_diffusion_cfg/best_diffusion_cfg_adversarial_aligned.pt"
 PREPROCESSED_DIR = PARENT_DIR / "data_preprocessed"
 OUTPUT_DIR = PARENT_DIR / "evaluation"
 RESULTS_FILE = OUTPUT_DIR / f"numeric_results_cfg_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -39,7 +39,7 @@ NUM_INFERENCE_STEPS = 1000  # Full 1000 steps for maximum quality
 BATCH_SIZE = 4
 VIEW = 'axial'
 MAX_BATCHES = 100  # 750 = ~3000 samples
-GUIDANCE_SCALE = 5.0  # CFG guidance scale
+GUIDANCE_SCALE = 7.5  # CFG guidance scale
 
 def compute_metrics(prediction, target):
     """Compute PSNR and SSIM between prediction and target."""
