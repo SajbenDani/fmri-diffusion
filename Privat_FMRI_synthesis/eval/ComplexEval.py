@@ -1,4 +1,59 @@
 #!/usr/bin/env python3
+"""
+Comprehensive Evaluation Framework for fMRI Diffusion Models.
+
+This module provides a complete evaluation framework for assessing the quality
+of fMRI synthesis using the trained autoencoder and diffusion models. It implements
+rigorous quantitative metrics and supports both classifier-free guidance (CFG)
+and standard diffusion evaluation approaches.
+
+Key Features:
+    - Quantitative quality assessment using PSNR and SSIM metrics
+    - Support for classifier-free guidance evaluation
+    - Batch-wise processing for memory efficiency
+    - Comprehensive results logging with timestamps
+    - Statistical analysis across multiple samples
+    - GPU/CPU memory management
+
+Evaluation Pipeline:
+    1. Load pre-trained autoencoder and diffusion models
+    2. Setup test dataset with proper data loading
+    3. For each test batch:
+       a. Encode ground truth to latent space (with/without degradation)
+       b. Sample from diffusion model using appropriate guidance
+       c. Decode samples back to fMRI space
+       d. Compute quality metrics against ground truth
+    4. Aggregate statistics and save comprehensive results
+
+Metrics Computed:
+    - PSNR (Peak Signal-to-Noise Ratio): Measures reconstruction fidelity
+    - SSIM (Structural Similarity Index): Measures perceptual similarity
+    - Both metrics are computed per sample and aggregated for statistical analysis
+
+Usage:
+    Run directly for complete evaluation:
+    ```bash
+    python ComplexEval.py
+    ```
+    
+    Or import for custom evaluation workflows:
+    ```python
+    from eval.ComplexEval import evaluate_diffusion_model
+    results = evaluate_diffusion_model(model_path, dataset_path)
+    ```
+
+Output:
+    - JSON file with detailed results and timestamps
+    - Console logging with progress tracking
+    - Statistical summaries (mean, std, min, max for each metric)
+
+Requirements:
+    - Pre-trained autoencoder and diffusion model checkpoints
+    - Test dataset in preprocessed patch format
+    - Sufficient GPU memory for batch processing
+    - scikit-image for metric computation
+"""
+
 import os
 import sys
 from pathlib import Path
@@ -10,44 +65,150 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 import json
 from datetime import datetime
+from typing import Dict, Tuple, List, Optional, Any
 
-# Add parent directory to path
+# Add parent directory to path for relative imports
 SCRIPT_DIR = Path(__file__).parent
 PARENT_DIR = SCRIPT_DIR.parent
 sys.path.append(str(PARENT_DIR))
 
-# Import models and dataset
+# Import custom modules
 from models.autoencoder import Improved3DAutoencoder
 from models.diffusion import DiffusionUNet3D
 from utils.dataset import FMRIDataModule
 from diffusers import DDPMScheduler
 
-# --- Configuration ---
+# =============================================================================
+# EVALUATION CONFIGURATION
+# =============================================================================
+
+# Hardware configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Model checkpoint paths - update these paths for your setup
 AUTOENCODER_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_finetuned/best_finetuned_autoencoder.pt"
 DIFFUSION_PATH = "/home/jovyan/work/ssd0/USERS/sajbendaniel/fmri-diffusion/Privat_FMRI_synthesis/checkpoints_diffusion_cfg/best_diffusion_cfg_adversarial_aligned.pt"
+
+# Data and output paths
 PREPROCESSED_DIR = PARENT_DIR / "data_preprocessed"
 OUTPUT_DIR = PARENT_DIR / "evaluation"
 RESULTS_FILE = OUTPUT_DIR / f"numeric_results_cfg_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
-# Model parameters
-LATENT_CHANNELS = 8
-BASE_CHANNELS = 32
-DIFFUSION_BASE_CHANNELS = 128
-SCALE_FACTOR = 2
-NUM_INFERENCE_STEPS = 1000  # Full 1000 steps for maximum quality
-BATCH_SIZE = 4
-VIEW = 'axial'
-MAX_BATCHES = 100  # 750 = ~3000 samples
-GUIDANCE_SCALE = 7.5  # CFG guidance scale
+# Model architecture parameters
+LATENT_CHANNELS = 8           # Latent space dimensionality
+BASE_CHANNELS = 32            # Autoencoder base channels
+DIFFUSION_BASE_CHANNELS = 128 # Diffusion model base channels
+SCALE_FACTOR = 2              # Super-resolution scale factor
 
-def compute_metrics(prediction, target):
-    """Compute PSNR and SSIM between prediction and target."""
-    # Convert to CPU tensors
+# Evaluation parameters
+NUM_INFERENCE_STEPS = 1000    # Full diffusion steps for maximum quality
+BATCH_SIZE = 4                # Batch size for evaluation (memory-dependent)
+VIEW = 'axial'                # Anatomical view orientation
+MAX_BATCHES = 100             # Maximum batches to evaluate (computational limit)
+GUIDANCE_SCALE = 7.5          # Classifier-free guidance strength
+
+# =============================================================================
+# METRIC COMPUTATION FUNCTIONS
+# =============================================================================
+
+def compute_metrics(prediction: torch.Tensor, target: torch.Tensor) -> Dict[str, float]:
+    """
+    Compute comprehensive quality metrics between prediction and target volumes.
+    
+    This function calculates Peak Signal-to-Noise Ratio (PSNR) and Structural
+    Similarity Index (SSIM) between predicted and ground truth fMRI volumes.
+    Both metrics are computed in a way that's robust to batch processing and
+    different tensor formats.
+    
+    Args:
+        prediction (torch.Tensor): Predicted fMRI volume
+            Shape: (batch_size, channels, depth, height, width) or flattened
+        target (torch.Tensor): Ground truth fMRI volume  
+            Shape: same as prediction
+            
+    Returns:
+        Dict[str, float]: Dictionary containing computed metrics
+            - 'psnr': Peak Signal-to-Noise Ratio in dB
+            - 'ssim': Structural Similarity Index (0-1 scale)
+            
+    Notes:
+        - PSNR measures pixel-wise reconstruction accuracy (higher is better)
+        - SSIM measures perceptual similarity considering structure (higher is better)
+        - Both metrics are averaged across all spatial dimensions and batch items
+        - Input tensors are automatically normalized to [0,1] range for fair comparison
+        
+    Mathematical Background:
+        PSNR = 20 * log10(MAX_VAL / sqrt(MSE))
+        SSIM considers luminance, contrast, and structure similarities
+    """
+    # Convert to CPU tensors for metric computation
     if isinstance(prediction, torch.Tensor):
-        pred = prediction.detach().cpu()
+        pred = prediction.detach().cpu().numpy()
     else:
         pred = prediction
+        
+    if isinstance(target, torch.Tensor):
+        targ = target.detach().cpu().numpy()
+    else:
+        targ = target
+    
+    # Ensure both arrays have same shape
+    if pred.shape != targ.shape:
+        raise ValueError(f"Shape mismatch: prediction {pred.shape} vs target {targ.shape}")
+    
+    # Flatten arrays for batch processing while preserving spatial structure
+    if pred.ndim > 3:
+        # For multi-dimensional tensors, compute metrics per sample then average
+        batch_size = pred.shape[0]
+        psnr_scores = []
+        ssim_scores = []
+        
+        for i in range(batch_size):
+            # Extract single volume (remove batch and channel dims if present)
+            pred_vol = pred[i].squeeze()
+            targ_vol = targ[i].squeeze()
+            
+            # Ensure 3D volume for processing
+            if pred_vol.ndim == 4:  # (C, D, H, W)
+                pred_vol = pred_vol[0]  # Take first channel
+                targ_vol = targ_vol[0]
+            
+            # Normalize to [0,1] range for fair metric comparison
+            pred_vol = (pred_vol - pred_vol.min()) / (pred_vol.max() - pred_vol.min() + 1e-8)
+            targ_vol = (targ_vol - targ_vol.min()) / (targ_vol.max() - targ_vol.min() + 1e-8)
+            
+            # Compute PSNR
+            try:
+                psnr_val = psnr(targ_vol, pred_vol, data_range=1.0)
+                psnr_scores.append(psnr_val)
+            except Exception as e:
+                print(f"Warning: PSNR computation failed for sample {i}: {e}")
+                psnr_scores.append(0.0)
+            
+            # Compute SSIM (requires at least 7x7 patches, handle edge cases)
+            try:
+                ssim_val = ssim(targ_vol, pred_vol, data_range=1.0, 
+                               win_size=min(7, min(pred_vol.shape[-2:])))
+                ssim_scores.append(ssim_val)
+            except Exception as e:
+                print(f"Warning: SSIM computation failed for sample {i}: {e}")
+                ssim_scores.append(0.0)
+        
+        # Return averaged metrics across batch
+        return {
+            'psnr': np.mean(psnr_scores),
+            'ssim': np.mean(ssim_scores)
+        }
+    
+    else:
+        # Single volume case
+        pred = (pred - pred.min()) / (pred.max() - pred.min() + 1e-8)
+        targ = (targ - targ.min()) / (targ.max() - targ.min() + 1e-8)
+        
+        psnr_val = psnr(targ, pred, data_range=1.0)
+        ssim_val = ssim(targ, pred, data_range=1.0)
+        
+        return {'psnr': psnr_val, 'ssim': ssim_val}
         
     if isinstance(target, torch.Tensor):
         targ = target.detach().cpu()

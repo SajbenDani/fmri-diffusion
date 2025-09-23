@@ -78,8 +78,8 @@ class ResidualBlock3D(nn.Module):
     
     Architecture:
         Input + Time -> Conv3D -> GroupNorm -> SiLU -> Conv3D -> GroupNorm -> + -> SiLU -> Output
-                 \                                                              /
-                  \-----------> Skip Connection + Time Conditioning ----------/
+                 \\                                                              /
+                  \\-----------> Skip Connection + Time Conditioning ----------/
     
     Time Conditioning Strategy:
         The time embedding is processed through an MLP and added as a bias term

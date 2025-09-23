@@ -64,8 +64,8 @@ class ResidualBlock3D(nn.Module):
     
     Architecture:
         Input -> Conv3D -> GroupNorm -> SiLU -> Conv3D -> GroupNorm -> + -> SiLU -> Output
-                    \                                                  /
-                     \-----------> Skip Connection -----------------/
+                    \\                                                  /
+                     \\-----------> Skip Connection -----------------/
     
     Args:
         in_channels (int): Number of input feature channels

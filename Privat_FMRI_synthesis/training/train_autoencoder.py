@@ -1,4 +1,68 @@
 #!/usr/bin/env python3
+"""
+3D Autoencoder Training Module for fMRI Latent Space Learning.
+
+This module implements the complete training pipeline for the 3D autoencoder
+that learns compressed latent representations of functional MRI (fMRI) data.
+The autoencoder serves as the foundation for the diffusion model pipeline,
+creating an efficient latent space for downstream generation tasks.
+
+Training Objectives:
+    1. Learn to compress 3D fMRI volumes into compact latent representations
+    2. Achieve high-fidelity reconstruction from compressed latents
+    3. Optionally learn discrete latent spaces through Vector Quantization (VQ)
+    4. Create stable latent representations suitable for diffusion modeling
+
+Key Features:
+    - Mixed precision training for memory efficiency and speed
+    - Advanced loss functions including MS-SSIM for perceptual quality
+    - Vector quantization support for discrete latent spaces
+    - Comprehensive validation and checkpointing
+    - Memory-optimized batch processing
+    - Robust training with early stopping
+
+Architecture Training Strategy:
+    The autoencoder is trained in a standard reconstruction paradigm:
+    - Forward: Input Volume -> Encoder -> Latent -> Decoder -> Reconstruction
+    - Loss: Combination of reconstruction loss + optional VQ regularization
+    - Validation: Monitor reconstruction quality on held-out data
+    - Checkpointing: Save best model based on validation performance
+
+Loss Components:
+    1. Reconstruction Loss: MSE between input and reconstructed volumes
+    2. Perceptual Loss (optional): MS-SSIM for structural similarity
+    3. VQ Loss (optional): Codebook and commitment losses for quantization
+    4. Regularization: Weight decay for model complexity control
+
+Training Phases:
+    - Phase 1: Initial convergence with high learning rate
+    - Phase 2: Fine-tuning with reduced learning rate (early stopping)
+    - Phase 3: Optional VQ codebook optimization
+
+Usage:
+    Direct execution:
+    ```bash
+    python train_autoencoder.py
+    ```
+    
+    Programmatic usage:
+    ```python
+    from training.train_autoencoder import train_autoencoder
+    model = train_autoencoder(config)
+    ```
+
+Output:
+    - Trained autoencoder model checkpoint
+    - Training logs with loss curves and metrics
+    - Validation performance statistics
+    - Model architecture summaries
+
+Requirements:
+    - Preprocessed fMRI patch datasets (train/val/test splits)
+    - CUDA GPU recommended (>8GB VRAM for batch_size=16)
+    - Optional: pytorch-msssim for advanced perceptual losses
+"""
+
 import os
 import sys
 import torch
@@ -10,44 +74,257 @@ import random
 import logging
 import time
 from pathlib import Path
+from typing import Dict, Tuple, Optional, Any
 
-# Add parent directory to path
+# Add parent directory to path for relative imports
 PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PARENT_DIR)
 
-# Import the model and dataset
+# Import custom modules
 from models.autoencoder import Improved3DAutoencoder
 from utils.dataset import FMRIDataModule
 
-USE_MSSSIM = False  # Define this outside the try block
-HAS_MSSSIM = False  # Default to False
+# =============================================================================
+# OPTIONAL ADVANCED LOSS FUNCTIONS
+# =============================================================================
+
+# MS-SSIM configuration - provides better perceptual reconstruction quality
+USE_MSSSIM = False  # Enable for perceptual loss (requires additional dependency)
+HAS_MSSSIM = False  # Will be set based on import success
 
 try:
-    if USE_MSSSIM:  # Only import if we want to use it
+    if USE_MSSSIM:
         from pytorch_msssim import MS_SSIM
         HAS_MSSSIM = True
+        logging.info("MS-SSIM loss function available")
 except ImportError:
-    print("Warning: pytorch-msssim not found. Install with: pip install pytorch-msssim")
+    logging.warning("pytorch-msssim not found. Install with: pip install pytorch-msssim")
+    logging.warning("Falling back to MSE-only loss function")
     HAS_MSSSIM = False
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# =============================================================================
+# LOGGING CONFIGURATION
+# =============================================================================
+
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("autoencoder_training.log"),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Config
-BATCH_SIZE = 16  # Can use larger batch size with optimized pipeline
-LEARNING_RATE = 1e-4
-EPOCHS = 100
-PATIENCE = 10
-SEED = 42
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-USE_MIXED_PRECISION = True if torch.cuda.is_available() else False
-USE_VQ = True
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
 
-# Set random seed
-def set_seed(seed):
+# Model training hyperparameters
+BATCH_SIZE = 16               # Batch size (adjust based on GPU memory)
+LEARNING_RATE = 1e-4          # Initial learning rate for Adam optimizer
+EPOCHS = 100                  # Maximum training epochs
+PATIENCE = 10                 # Early stopping patience (epochs without improvement)
+SEED = 42                     # Random seed for reproducibility
+
+# Hardware and optimization settings
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+USE_MIXED_PRECISION = True if torch.cuda.is_available() else False  # AMP for efficiency
+USE_VQ = True                 # Enable Vector Quantization for discrete latents
+
+# Model architecture parameters
+LATENT_CHANNELS = 8           # Dimension of latent space
+BASE_CHANNELS = 32            # Base channel count for autoencoder
+VQ_EMBEDDINGS = 512           # Size of VQ codebook if VQ enabled
+
+# Loss function weights
+RECONSTRUCTION_WEIGHT = 1.0   # Weight for MSE reconstruction loss
+VQ_WEIGHT = 0.1              # Weight for VQ regularization loss
+PERCEPTUAL_WEIGHT = 0.1      # Weight for MS-SSIM perceptual loss (if available)
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def set_seed(seed: int) -> None:
+    """
+    Set random seed for reproducible training across multiple runs.
+    
+    This function ensures deterministic behavior across PyTorch, NumPy,
+    and Python's random module. Critical for comparing different model
+    configurations and reproducing experimental results.
+    
+    Args:
+        seed (int): Random seed value
+        
+    Note:
+        Even with seed setting, some CUDA operations may introduce
+        non-determinism for performance reasons. For complete determinism,
+        additional CUDA flags may be needed.
+    """
     random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    
+    # For complete reproducibility (may impact performance)
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    
+    logger.info(f"Random seed set to {seed}")
+
+
+def compute_reconstruction_loss(reconstruction: torch.Tensor, target: torch.Tensor, 
+                              use_perceptual: bool = False) -> torch.Tensor:
+    """
+    Compute comprehensive reconstruction loss between predicted and target volumes.
+    
+    This function computes a combination of pixel-wise and perceptual losses
+    to encourage both accurate reconstruction and visual quality. The loss
+    combination helps the model learn meaningful latent representations.
+    
+    Args:
+        reconstruction (torch.Tensor): Reconstructed fMRI volume from decoder
+            Shape: (batch_size, channels, depth, height, width)
+        target (torch.Tensor): Ground truth fMRI volume
+            Shape: same as reconstruction
+        use_perceptual (bool): Whether to include MS-SSIM perceptual loss
+        
+    Returns:
+        torch.Tensor: Combined reconstruction loss (scalar)
+        
+    Loss Components:
+        1. MSE Loss: Pixel-wise reconstruction accuracy L2(recon, target)
+        2. MS-SSIM Loss (optional): Multi-scale structural similarity
+        
+    The combination ensures both accurate reconstruction and preservation
+    of important structural patterns in the fMRI data.
+    """
+    # Primary reconstruction loss: Mean Squared Error
+    mse_loss = nn.functional.mse_loss(reconstruction, target)
+    total_loss = RECONSTRUCTION_WEIGHT * mse_loss
+    
+    # Optional perceptual loss using Multi-Scale SSIM
+    if use_perceptual and HAS_MSSSIM:
+        try:
+            # MS-SSIM requires specific data format and normalization
+            # Ensure values are in [0,1] range
+            recon_norm = torch.clamp((reconstruction - reconstruction.min()) / 
+                                   (reconstruction.max() - reconstruction.min() + 1e-8), 0, 1)
+            target_norm = torch.clamp((target - target.min()) / 
+                                    (target.max() - target.min() + 1e-8), 0, 1)
+            
+            # Initialize MS-SSIM loss function if not exists
+            if not hasattr(compute_reconstruction_loss, 'ms_ssim_loss'):
+                compute_reconstruction_loss.ms_ssim_loss = MS_SSIM(
+                    data_range=1.0, 
+                    size_average=True, 
+                    channel=reconstruction.shape[1]
+                ).to(reconstruction.device)
+            
+            # Compute MS-SSIM loss (1 - MS-SSIM for loss minimization)
+            ms_ssim_val = compute_reconstruction_loss.ms_ssim_loss(recon_norm, target_norm)
+            ms_ssim_loss = 1.0 - ms_ssim_val
+            
+            total_loss += PERCEPTUAL_WEIGHT * ms_ssim_loss
+            
+        except Exception as e:
+            logger.warning(f"MS-SSIM computation failed, using MSE only: {e}")
+    
+    return total_loss
+
+
+def validate_model(model: nn.Module, val_loader: torch.utils.data.DataLoader, 
+                  device: torch.device) -> Dict[str, float]:
+    """
+    Perform comprehensive model validation on held-out data.
+    
+    This function evaluates the trained autoencoder on validation data to
+    monitor training progress and detect overfitting. It computes multiple
+    metrics to assess both reconstruction quality and latent space properties.
+    
+    Args:
+        model (nn.Module): Trained autoencoder model
+        val_loader (DataLoader): Validation data loader
+        device (torch.device): Computation device
+        
+    Returns:
+        Dict[str, float]: Validation metrics
+            - 'val_loss': Average validation loss
+            - 'val_mse': Average MSE reconstruction error
+            - 'val_vq_loss': Average VQ loss (if applicable)
+            - 'val_perplexity': VQ codebook usage (if applicable)
+            
+    Process:
+        1. Set model to evaluation mode (disable dropout, etc.)
+        2. Process validation batches without gradient computation
+        3. Compute reconstruction and regularization losses
+        4. Aggregate statistics across all validation samples
+        5. Return comprehensive metrics dictionary
+    """
+    model.eval()
+    total_loss = 0.0
+    total_mse = 0.0
+    total_vq_loss = 0.0
+    total_samples = 0
+    
+    with torch.no_grad():
+        for batch_idx, (fmri_data, labels) in enumerate(tqdm(val_loader, desc="Validation")):
+            try:
+                # Move data to device
+                fmri_data = fmri_data.to(device, non_blocking=True)
+                batch_size = fmri_data.size(0)
+                
+                # Forward pass through autoencoder
+                if USE_VQ:
+                    reconstruction, latent, vq_loss = model(fmri_data)
+                    
+                    # Compute losses
+                    recon_loss = compute_reconstruction_loss(
+                        reconstruction, fmri_data, use_perceptual=USE_MSSSIM
+                    )
+                    total_loss += (recon_loss + VQ_WEIGHT * vq_loss).item() * batch_size
+                    total_vq_loss += vq_loss.item() * batch_size
+                    
+                else:
+                    reconstruction, latent = model(fmri_data)
+                    recon_loss = compute_reconstruction_loss(
+                        reconstruction, fmri_data, use_perceptual=USE_MSSSIM
+                    )
+                    total_loss += recon_loss.item() * batch_size
+                
+                # Compute MSE for monitoring (always computed)
+                mse = nn.functional.mse_loss(reconstruction, fmri_data)
+                total_mse += mse.item() * batch_size
+                total_samples += batch_size
+                
+            except Exception as e:
+                logger.warning(f"Validation batch {batch_idx} failed: {e}")
+                continue
+    
+    # Compute average metrics
+    if total_samples > 0:
+        avg_loss = total_loss / total_samples
+        avg_mse = total_mse / total_samples
+        avg_vq_loss = total_vq_loss / total_samples if USE_VQ else 0.0
+        
+        metrics = {
+            'val_loss': avg_loss,
+            'val_mse': avg_mse,
+            'val_vq_loss': avg_vq_loss
+        }
+        
+        logger.info(f"Validation - Loss: {avg_loss:.6f}, MSE: {avg_mse:.6f}")
+        if USE_VQ:
+            logger.info(f"Validation - VQ Loss: {avg_vq_loss:.6f}")
+            
+        return metrics
+    else:
+        logger.error("No valid validation samples processed")
+        return {'val_loss': float('inf'), 'val_mse': float('inf'), 'val_vq_loss': 0.0}
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
